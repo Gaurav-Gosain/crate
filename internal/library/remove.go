@@ -64,7 +64,7 @@ func RemoveTracks(ctx context.Context, c *config.Config, s config.Source, log fu
 		seen  = map[string]bool{}
 	)
 	for _, e := range entries {
-		rel, ok := idx[fold(e.title)]
+		rel, ok := idx.lookup(e.title)
 		if !ok || seen[rel] {
 			continue
 		}

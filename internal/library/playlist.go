@@ -53,22 +53,58 @@ func safeName(s string) string {
 	return s
 }
 
+// libIndex maps folded track titles to paths relative to the music root.
+type libIndex struct {
+	byKey map[string]string
+	keys  []string
+}
+
+// lookup finds the file for a title.
+//
+// An exact match is tried first. Failing that the title is matched by prefix,
+// because yt-dlp truncates long filenames and the stem left on disk is then a
+// prefix of the title it came from: "Ganesh Gayatri Mantra | Sadhana Sar" is
+// all that survives of a much longer name. A prefix has to be long enough to
+// be meaningful and has to identify exactly one file, so that two different
+// tracks sharing an opening cannot be confused for each other.
+func (ix libIndex) lookup(title string) (string, bool) {
+	key := fold(title)
+	if key == "" {
+		return "", false
+	}
+	if p, ok := ix.byKey[key]; ok {
+		return p, true
+	}
+	const minPrefix = 12
+	var (
+		best  string
+		bestN int
+	)
+	for _, k := range ix.keys {
+		if len(k) < minPrefix || len(k) <= bestN || !strings.HasPrefix(key, k) {
+			continue
+		}
+		best, bestN = ix.byKey[k], len(k)
+	}
+	return best, best != ""
+}
+
 // index maps a folded track title to its path relative to the music root.
 //
 // The remote is indexed rather than the local library because the remote is
 // the authoritative copy: it is complete even when crate runs with no local
 // copy kept, and it is what the music server will actually resolve the
 // playlist entries against.
-func index(ctx context.Context, c *config.Config) (map[string]string, error) {
+func index(ctx context.Context, c *config.Config) (libIndex, error) {
 	root := strings.TrimSuffix(c.Remote.Path, "/")
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", c.Remote.Host,
 		fmt.Sprintf("find %q -type f", root))
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("index remote: %w", err)
+		return libIndex{}, fmt.Errorf("index remote: %w", err)
 	}
 
-	idx := make(map[string]string)
+	idx := libIndex{byKey: make(map[string]string)}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -90,8 +126,9 @@ func index(ctx context.Context, c *config.Config) (map[string]string, error) {
 		}
 		// First writer wins, so a track that exists in several folders
 		// resolves to a stable choice rather than whichever find emitted last.
-		if _, seen := idx[key]; !seen {
-			idx[key] = rel
+		if _, seen := idx.byKey[key]; !seen {
+			idx.byKey[key] = rel
+			idx.keys = append(idx.keys, key)
 		}
 	}
 	return idx, nil
@@ -159,7 +196,7 @@ func Playlists(ctx context.Context, c *config.Config, ev chan<- Event) ([]Playli
 	if err != nil {
 		return nil, err
 	}
-	send(ev, Event{Source: "playlists", Text: fmt.Sprintf("indexed %d tracks", len(idx)), Pct: -1, Phase: PhasePlaylisting})
+	send(ev, Event{Source: "playlists", Text: fmt.Sprintf("indexed %d tracks", len(idx.byKey)), Pct: -1, Phase: PhasePlaylisting})
 
 	// Sources are resolved concurrently: each is a network round trip that
 	// spends almost all its time waiting.
@@ -213,7 +250,7 @@ func Playlists(ctx context.Context, c *config.Config, ev chan<- Event) ([]Playli
 // writePlaylist matches a source's tracks against the library and writes the
 // .m3u. It returns nil when nothing matched, because an empty playlist is
 // worse than no playlist: it looks like the music went missing.
-func writePlaylist(c *config.Config, s config.Source, entries []entry, idx map[string]string) (*Playlist, error) {
+func writePlaylist(c *config.Config, s config.Source, entries []entry, idx libIndex) (*Playlist, error) {
 	name := s.Name
 	for _, e := range entries {
 		if e.playlist != "" {
@@ -231,7 +268,7 @@ func writePlaylist(c *config.Config, s config.Source, entries []entry, idx map[s
 		seen  = make(map[string]bool)
 	)
 	for _, e := range entries {
-		rel, ok := idx[fold(e.title)]
+		rel, ok := idx.lookup(e.title)
 		if !ok || seen[rel] {
 			continue
 		}
