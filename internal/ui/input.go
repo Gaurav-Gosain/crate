@@ -41,10 +41,14 @@ func (a *App) readKeys() {
 func (a *App) handleKey(c byte) bool {
 	a.mu.Lock()
 	editing := a.prompt != ""
+	m := a.mode
 	a.mu.Unlock()
 
 	if editing {
 		return a.handleEditKey(c)
+	}
+	if m == modeSearch {
+		return a.handleSearchKey(c)
 	}
 
 	switch c {
@@ -67,12 +71,14 @@ func (a *App) handleKey(c byte) bool {
 		go a.syncSelected()
 	case 'a':
 		a.beginPrompt("url:", a.addSource)
+	case '/':
+		a.beginSearch()
 	case 'd':
 		a.removeSelected()
 	case 'r':
 		go a.scanOnly()
 	case '?':
-		a.logf("keys: s sync all | enter sync selected | a add | d remove | r rescan server | j/k move | q quit")
+		a.logf("keys: / search | s sync all | enter sync selected | a add url | d remove | r rescan | j/k move | q quit")
 	}
 	return false
 }

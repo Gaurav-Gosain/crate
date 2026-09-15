@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
+	"github.com/Gaurav-Gosain/crate/internal/library"
 	"golang.org/x/term"
 )
 
@@ -42,6 +43,13 @@ type row struct {
 	detail string
 }
 
+type mode int
+
+const (
+	modeList mode = iota
+	modeSearch
+)
+
 // App owns the terminal and all mutable view state.
 type App struct {
 	cfg *config.Config
@@ -49,10 +57,17 @@ type App struct {
 	fd  int
 
 	mu     sync.Mutex
+	mode   mode
 	rows   []row
 	logs   []string
 	cursor int
 	busy   bool
+
+	// search results overlay
+	results   []library.Result
+	rcursor   int
+	searching bool
+	query     string
 
 	// input mode: when prompt is non-empty the footer is an editable field
 	prompt string

@@ -20,6 +20,7 @@ func (a *App) draw() {
 	}
 
 	a.mu.Lock()
+	m := a.mode
 	rows := make([]row, len(a.rows))
 	copy(rows, a.rows)
 	logs := a.logs
@@ -34,6 +35,14 @@ func (a *App) draw() {
 	b.WriteString("\x1b[?2026h")
 
 	a.drawHeader(&b, w, busy)
+
+	if m == modeSearch {
+		a.drawResults(&b, w, h)
+		a.drawFooter(&b, w, h, prompt, buf)
+		b.WriteString("\x1b[?2026l")
+		a.tty.WriteString(b.String())
+		return
+	}
 
 	listRows := len(rows)
 	if listRows == 0 {
@@ -59,9 +68,18 @@ func (a *App) drawHeader(b *strings.Builder, w int, busy bool) {
 	clearLine(b)
 	fmt.Fprintf(b, " %s%scrate%s %s%s%s", bold, accent, reset, dim, "music, kept in sync", reset)
 
+	a.mu.Lock()
+	searching := a.searching
+	a.mu.Unlock()
+
 	state := "idle"
 	col := muted
-	if busy {
+	switch {
+	case searching:
+		// A search resolves each entry through yt-dlp and can run for the
+		// better part of a minute, so say so rather than looking hung.
+		state, col = "searching", accent
+	case busy:
 		state, col = "working", warn
 	}
 	right := fmt.Sprintf("%s%s%s ", col, state, reset)
@@ -154,8 +172,8 @@ func (a *App) drawFooter(b *strings.Builder, w, h int, prompt, buf string) {
 		return
 	}
 	keys := []struct{ k, d string }{
-		{"s", "sync all"}, {"enter", "sync one"}, {"a", "add"},
-		{"d", "remove"}, {"j/k", "move"}, {"q", "quit"},
+		{"/", "search"}, {"s", "sync all"}, {"enter", "sync one"},
+		{"a", "add url"}, {"d", "remove"}, {"q", "quit"},
 	}
 	var parts []string
 	for _, kv := range keys {

@@ -26,7 +26,8 @@ Requires `yt-dlp`, `ffmpeg` and `rsync` on PATH.
 
 | key | action |
 |---|---|
-| `a` | add a source |
+| `/` | search YouTube Music |
+| `a` | add a source by URL |
 | `d` | remove the selected source |
 | `s` | sync everything |
 | `enter` | sync the selected source |
@@ -34,6 +35,29 @@ Requires `yt-dlp`, `ffmpeg` and `rsync` on PATH.
 | `j` `k` | move, `g` `G` for top and bottom |
 | `?` | key help |
 | `q` | quit |
+
+## Searching
+
+Press `/` and type. crate queries YouTube Music and shows both the individual
+tracks and the albums they belong to, so you can take one song or the whole
+record. Press enter to add the highlighted result, escape to go back.
+
+YouTube Music is used rather than plain YouTube because its entries carry real
+artist, album and track tags. A plain YouTube search returns video titles like
+`M I L E S D A V I S - Kind Of Blue - Full Album`, which file badly.
+
+That quality has a cost: yt-dlp has to resolve each entry, roughly two seconds
+apiece, and album results expand into their tracks. A search takes tens of
+seconds. The header shows `searching` while it runs.
+
+Spotify is not supported and cannot be: its catalogue is DRM protected, so
+there is nothing to download. Paste a Spotify link and nothing will happen.
+
+## Adding music you already own
+
+Anything you drop into the library directory is mirrored on the next sync,
+tagged or not. crate does not need to have downloaded a file to look after it,
+so an existing collection can be copied in and will sync alongside the rest.
 
 ## How a sync works
 

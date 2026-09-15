@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // A small palette, kept to what a 256-colour terminal reliably shows.
@@ -24,24 +25,99 @@ func moveTo(b *strings.Builder, row, col int) {
 
 func clearLine(b *strings.Builder) { b.WriteString("\x1b[2K") }
 
+// visibleWidth counts display cells, skipping ANSI escape sequences.
+//
+// Measuring len() or rune count on a styled string counts "\x1b[1m" as four
+// characters, so a footer that fits gets cut short and, worse, can be sliced
+// in the middle of an escape sequence. That renders as stray characters.
+func visibleWidth(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			i += escapeLen(s[i:])
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		n++
+	}
+	return n
+}
+
+// escapeLen returns the byte length of the escape sequence starting at s[0],
+// or 1 if this is a lone ESC. Handles CSI (ESC [ ... final) and OSC/APC style
+// sequences terminated by ST or BEL, which covers what this UI emits.
+func escapeLen(s string) int {
+	if len(s) < 2 {
+		return 1
+	}
+	switch s[1] {
+	case '[':
+		for i := 2; i < len(s); i++ {
+			if s[i] >= 0x40 && s[i] <= 0x7e {
+				return i + 1
+			}
+		}
+		return len(s)
+	case ']', '_', 'P', '^':
+		for i := 2; i < len(s); i++ {
+			if s[i] == 0x07 {
+				return i + 1
+			}
+			if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return len(s)
+	}
+	return 2
+}
+
 // truncate cuts to w display cells, appending an ellipsis when it had to cut.
-// It counts runes rather than bytes so multi-byte titles are not sliced apart.
+// Escape sequences pass through without consuming width and are never split,
+// and a reset is appended if styling was left open.
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= w {
+	if visibleWidth(s) <= w {
 		return s
 	}
-	if w <= 1 {
-		return string(r[:w])
+	limit := w
+	if w > 1 {
+		limit = w - 1
 	}
-	return string(r[:w-1]) + "…"
+
+	var b strings.Builder
+	n := 0
+	styled := false
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			l := escapeLen(s[i:])
+			b.WriteString(s[i : i+l])
+			styled = true
+			i += l
+			continue
+		}
+		if n >= limit {
+			break
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteRune(r)
+		i += size
+		n++
+	}
+	if w > 1 {
+		b.WriteString("…")
+	}
+	if styled {
+		b.WriteString(reset)
+	}
+	return b.String()
 }
 
 func pad(s string, w int) string {
-	n := len([]rune(s))
+	n := visibleWidth(s)
 	if n >= w {
 		return truncate(s, w)
 	}
