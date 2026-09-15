@@ -67,11 +67,14 @@ func Sync(ctx context.Context, c *config.Config, ev chan<- Event) error {
 		if line == "" {
 			continue
 		}
-		pct := -1.0
+		e := Event{Source: "mirror", Text: line, Pct: -1, Phase: PhaseMirroring}
 		if m := pctRe.FindStringSubmatch(line); m != nil {
-			fmt.Sscanf(m[1], "%f", &pct)
+			fmt.Sscanf(m[1], "%f", &e.Pct)
 		}
-		ev <- Event{Source: "sync", Text: line, Pct: pct}
+		if m := speedRe.FindStringSubmatch(line); m != nil {
+			e.Speed = strings.TrimSpace(m[1])
+		}
+		ev <- e
 	}
 	return cmd.Wait()
 }

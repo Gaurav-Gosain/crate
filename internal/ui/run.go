@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 
@@ -64,6 +65,7 @@ func (a *App) run(idx []int) {
 		return
 	}
 	a.busy = true
+	a.started = time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.mu.Unlock()
@@ -112,7 +114,10 @@ func (a *App) run(idx []int) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			a.setRow(i, func(r *row) { r.state = running; r.pct = -1; r.detail = "fetching" })
+			a.setRow(i, func(r *row) {
+				r.state, r.pct, r.phase = running, -1, library.PhaseFetching
+				r.file, r.speed, r.eta, r.done, r.note = "", "", "", 0, ""
+			})
 			a.logf("── %s", src.Name)
 
 			// Forward percentages to this row while it runs.
@@ -121,9 +126,27 @@ func (a *App) run(idx []int) {
 			go func() {
 				defer close(relay)
 				for e := range rowEv {
-					if e.Pct >= 0 {
-						a.setRow(i, func(r *row) { r.pct = e.Pct })
-					}
+					a.setRow(i, func(r *row) {
+						if e.Pct >= 0 {
+							r.pct = e.Pct
+						}
+						if e.Phase != library.PhaseIdle {
+							r.phase = e.Phase
+						}
+						if e.File != "" {
+							r.file = e.File
+						}
+						if e.Speed != "" {
+							r.speed = e.Speed
+						}
+						if e.ETA != "" {
+							r.eta = e.ETA
+						}
+						if e.Finished {
+							r.done++
+							r.pct = -1
+						}
+					})
 					ev <- e
 				}
 			}()
@@ -136,11 +159,13 @@ func (a *App) run(idx []int) {
 				fmu.Lock()
 				failures++
 				fmu.Unlock()
-				a.setRow(i, func(r *row) { r.state = failed; r.detail = err.Error() })
+				a.setRow(i, func(r *row) { r.state, r.note = failed, err.Error() })
 				a.logf("%s failed: %v", src.Name, err)
 				return
 			}
-			a.setRow(i, func(r *row) { r.state = succeeded; r.pct = -1; r.detail = "downloaded" })
+			a.setRow(i, func(r *row) {
+				r.state, r.pct, r.phase, r.file = succeeded, -1, library.PhaseIdle, ""
+			})
 		}(i, src)
 	}
 	wg.Wait()

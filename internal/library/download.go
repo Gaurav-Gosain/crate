@@ -15,20 +15,94 @@ import (
 	"github.com/Gaurav-Gosain/crate/internal/config"
 )
 
-// Event is a single line of progress from a running step.
+// Phase is what a source is currently doing, so the interface can say
+// something more useful than "working".
+type Phase int
+
+const (
+	PhaseIdle Phase = iota
+	PhaseFetching
+	PhaseConverting
+	PhaseTagging
+	PhaseMirroring
+)
+
+func (p Phase) String() string {
+	switch p {
+	case PhaseFetching:
+		return "fetching"
+	case PhaseConverting:
+		return "converting"
+	case PhaseTagging:
+		return "tagging"
+	case PhaseMirroring:
+		return "mirroring"
+	}
+	return "idle"
+}
+
+// Event is one parsed line of progress from a running step. Text is kept for
+// the log; the other fields are what the interface draws.
 type Event struct {
 	Source string
 	Text   string
+	Phase  Phase
 	// Pct is -1 when the step reports no percentage.
-	Pct  float64
-	Err  bool
-	Done bool
+	Pct float64
+	// Speed and ETA are as yt-dlp reports them, already formatted.
+	Speed string
+	ETA   string
+	// File is the track being worked on, without its directory.
+	File string
+	// Finished marks a track that just completed, so callers can count.
+	Finished bool
 }
 
-// yt-dlp writes progress as "[download]  42.0% of ...". Parsing the percent
-// lets the UI draw a bar without yt-dlp's carriage-return redraws leaking
-// into the log.
-var pctRe = regexp.MustCompile(`(\d{1,3}\.\d)%`)
+// yt-dlp writes progress as:
+//
+//	[download]  42.0% of    3.56MiB at    1.01MiB/s ETA 00:03
+//
+// Pulling the pieces out lets the interface show what is happening rather
+// than a bare percentage, and keeps yt-dlp's carriage-return redraws out of
+// the log.
+var (
+	pctRe   = regexp.MustCompile(`(\d{1,3}\.\d)%`)
+	speedRe = regexp.MustCompile(`(?:at\s+)?([0-9.]+\s*[KMG]?i?B/s)`)
+	etaRe   = regexp.MustCompile(`ETA\s+([0-9:]+)`)
+	destRe  = regexp.MustCompile(`^\[(?:download|ExtractAudio)\]\s+Destination:\s+(.*)$`)
+)
+
+// parseLine turns one line of yt-dlp output into an Event.
+func parseLine(source, line string) Event {
+	e := Event{Source: source, Text: line, Pct: -1}
+
+	switch {
+	case strings.HasPrefix(line, "[ExtractAudio]"):
+		e.Phase = PhaseConverting
+	case strings.HasPrefix(line, "[Metadata]"), strings.HasPrefix(line, "[EmbedThumbnail]"):
+		e.Phase = PhaseTagging
+	case strings.HasPrefix(line, "[download]"):
+		e.Phase = PhaseFetching
+	}
+
+	if m := destRe.FindStringSubmatch(line); m != nil {
+		e.File = filepath.Base(strings.TrimSpace(m[1]))
+		// A conversion destination means the download for that track is done.
+		if strings.HasPrefix(line, "[ExtractAudio]") {
+			e.Finished = true
+		}
+	}
+	if m := pctRe.FindStringSubmatch(line); m != nil {
+		fmt.Sscanf(m[1], "%f", &e.Pct)
+	}
+	if m := speedRe.FindStringSubmatch(line); m != nil {
+		e.Speed = strings.TrimSpace(m[1])
+	}
+	if m := etaRe.FindStringSubmatch(line); m != nil {
+		e.ETA = m[1]
+	}
+	return e
+}
 
 // outputTemplate lays files out the way music servers expect:
 // Artist/Album/Track. Fields fall back through yt-dlp's alternates so a
@@ -145,11 +219,7 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		if line == "" {
 			continue
 		}
-		pct := -1.0
-		if m := pctRe.FindStringSubmatch(line); m != nil {
-			fmt.Sscanf(m[1], "%f", &pct)
-		}
-		ev <- Event{Source: s.Name, Text: line, Pct: pct}
+		ev <- parseLine(s.Name, line)
 	}
 	return cmd.Wait()
 }

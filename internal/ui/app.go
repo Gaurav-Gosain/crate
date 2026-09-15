@@ -37,10 +37,17 @@ func (s status) label() (string, string) {
 }
 
 type row struct {
-	src    config.Source
-	state  status
-	pct    float64
-	detail string
+	src   config.Source
+	state status
+	pct   float64
+
+	// live detail, so a working row can say what it is actually doing
+	phase library.Phase
+	file  string // current track, without directory
+	speed string
+	eta   string
+	done  int // tracks finished in this run
+	note  string
 }
 
 type mode int
@@ -73,6 +80,9 @@ type App struct {
 	prompt string
 	buf    []rune
 	onSubm func(string)
+
+	// started is when the current run began, for the elapsed clock.
+	started time.Time
 
 	redrawCh chan struct{}
 	quit     chan struct{}
