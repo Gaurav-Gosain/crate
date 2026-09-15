@@ -36,6 +36,7 @@ func (a *App) draw() {
 	// Synchronised update: the terminal presents a whole frame rather than
 	// tearing partway through.
 	b.WriteString("\x1b[?2026h")
+	b.WriteString("\x1b[2J")
 
 	a.drawHeader(&b, w, rows, busy, searching, started)
 
@@ -47,17 +48,55 @@ func (a *App) draw() {
 		return
 	}
 
-	listRows := max(len(rows), 1)
-	if maxList := h - headerRows - footerRows - minLogRows - 2; listRows > maxList {
-		listRows = maxList
-	}
+	// Vertical budget. The list takes what it needs up to a third of the
+	// screen; activity takes the rest, so the pane that grows is the one
+	// with something to say.
+	const (
+		top     = 4 // header, rule, blank, section label
+		gapRows = 2 // blank plus rule between the panes
+		bottom  = 3 // rule, keys, and the line they sit on
+	)
+	listMax := max((h-top-gapRows-bottom)/2, 3)
+	listRows := clamp(max(len(rows), 1), 1, listMax)
 
-	a.drawList(&b, w, rows, cursor, listRows)
-	a.drawLogs(&b, w, h, headerRows+listRows+1, logs)
+	section(&b, 3, w, "sources", sourcesSummary(rows))
+	a.drawList(&b, w, 4, rows, cursor, listRows)
+
+	sep := 4 + listRows
+	moveTo(&b, sep, 1)
+	clearLine(&b)
+	fmt.Fprintf(&b, "%s%s%s", rule, strings.Repeat("─", w), reset)
+
+	a.drawLogs(&b, w, h, sep+1, logs)
 	a.drawFooter(&b, w, h, prompt, buf)
 
 	b.WriteString("\x1b[?2026l")
 	a.tty.WriteString(b.String())
+}
+
+// sourcesSummary is the right hand figure on the sources header: what the set
+// looks like as a whole, so the eye does not have to count rows.
+func sourcesSummary(rows []row) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var working, done int
+	for _, r := range rows {
+		switch r.state {
+		case running:
+			working++
+		case succeeded:
+			done++
+		}
+	}
+	switch {
+	case working > 0:
+		return fmt.Sprintf("%s%d working%s %s·%s %s%d%s",
+			warn, working, reset, rule, reset, muted, len(rows), reset)
+	case done > 0:
+		return fmt.Sprintf("%s%d of %d synced%s", muted, done, len(rows), reset)
+	}
+	return fmt.Sprintf("%s%d source%s%s", muted, len(rows), plural(len(rows)), reset)
 }
 
 // drawHeader is the one line that says what the whole program is doing. The
@@ -81,17 +120,7 @@ func (a *App) drawHeader(b *strings.Builder, w int, rows []row, busy, searching 
 		right = fmt.Sprintf("%s%d done%s %s·%s %s%s%s",
 			ok, done, reset, rule, reset, muted, el, reset)
 	default:
-		n := 0
-		for _, r := range rows {
-			if r.state == succeeded {
-				n++
-			}
-		}
-		if n > 0 {
-			right = fmt.Sprintf("%s%d of %d synced%s", muted, n, len(rows), reset)
-		} else {
-			right = muted + "idle" + reset
-		}
+		right = muted + "idle" + reset
 	}
 	rightAt(b, 1, w, right)
 
@@ -120,9 +149,9 @@ func rightAt(b *strings.Builder, row, w int, s string) {
 	b.WriteString(s)
 }
 
-func (a *App) drawList(b *strings.Builder, w int, rows []row, cursor, visible int) {
+func (a *App) drawList(b *strings.Builder, w, first int, rows []row, cursor, visible int) {
 	if len(rows) == 0 {
-		moveTo(b, headerRows+1, 1)
+		moveTo(b, first, 1)
 		clearLine(b)
 		fmt.Fprintf(b, " %spress %s/%s to search, or %sa%s to add a url%s",
 			dim, reset+bold, reset+dim, reset+bold, reset+dim, reset)
@@ -138,7 +167,7 @@ func (a *App) drawList(b *strings.Builder, w int, rows []row, cursor, visible in
 
 	for i := 0; i < visible && start+i < len(rows); i++ {
 		r := rows[start+i]
-		line := headerRows + 1 + i
+		line := first + i
 		moveTo(b, line, 1)
 		clearLine(b)
 
@@ -196,23 +225,40 @@ func rowDetail(r row) string {
 	return ""
 }
 
+// drawLogs fills the activity pane from the bottom up, so the newest line
+// always sits just above the footer rule and the empty space, when there is
+// little to show, is above the text rather than a void below it.
+// drawLogs fills the activity pane from the bottom up, so the newest line sits
+// just above the footer rule. The section label travels with the block rather
+// than being stranded at the top of an empty pane, so when there is little to
+// show the gap reads as deliberate spacing instead of a hole.
 func (a *App) drawLogs(b *strings.Builder, w, h, top int, logs []string) {
-	section(b, top, w, "activity", "")
-
-	avail := h - top - footerRows - 1
+	last := h - footerRows - 1
+	avail := last - top + 1 - 1 // one row reserved for the label
 	if avail < 1 {
 		return
 	}
-	start := max(len(logs)-avail, 0)
-	for i := 0; i < avail; i++ {
-		moveTo(b, top+1+i, 1)
+
+	show := logs
+	if len(show) > avail {
+		show = show[len(show)-avail:]
+	}
+	for r := top; r <= last; r++ {
+		moveTo(b, r, 1)
 		clearLine(b)
-		if start+i >= len(logs) {
-			continue
-		}
-		l := logs[start+i]
+	}
+
+	labelRow := last - len(show)
+	if labelRow < top {
+		labelRow = top
+	}
+	section(b, labelRow, w, "activity", "")
+
+	startRow := labelRow + 1
+	for i, l := range show {
+		moveTo(b, startRow+i, 1)
 		// The timestamp is furniture; dim it so the message reads first.
-		if len(l) > 8 && l[2] == ':' && l[5] == ':' {
+		if len(l) > 9 && l[2] == ':' && l[5] == ':' {
 			fmt.Fprintf(b, " %s%s%s %s", rule, l[:8], reset, truncate(muted+l[9:]+reset, w-11))
 		} else {
 			fmt.Fprintf(b, " %s", truncate(muted+l+reset, w-2))
