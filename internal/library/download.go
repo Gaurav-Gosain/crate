@@ -34,7 +34,7 @@ var pctRe = regexp.MustCompile(`(\d{1,3}\.\d)%`)
 // bare video with no album metadata still files somewhere sensible.
 const outputTemplate = `%(artist,album_artist,creator,uploader,channel|Unknown Artist)s/` +
 	`%(album,playlist_title,playlist|Singles)s/` +
-	`%(track_number|)s%(track_number& - |)s%(track,title)s.%(ext)s`
+	`%(track_number,playlist_index|)s%(track_number,playlist_index& - |)s%(track,title)s.%(ext)s`
 
 // Download fetches anything new from one source.
 //
@@ -65,6 +65,10 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		// "Artist - Track" gives the music server something to group on.
 		"--parse-metadata", "%(title)s:%(?P<artist>.+?) - (?P<track>.+)",
 		"--parse-metadata", "%(playlist_title,album)s:%(album)s",
+		// Album playlists often carry no track numbers, which leaves a
+		// music server sorting the record alphabetically. The position in
+		// the playlist is the track order, so fall back to it.
+		"--parse-metadata", "%(track_number,playlist_index)s:%(track_number)s",
 		// Some hosts put an uploader email where the artist belongs, which
 		// produced folders like "alan@smithee.com". Anything shaped like an
 		// address is not an artist name.

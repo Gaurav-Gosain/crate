@@ -22,6 +22,7 @@ Requires `yt-dlp`, `ffmpeg` and `rsync` on PATH.
 ## Use
 
     crate          open the interface
+    crate sync     run one sync without the interface, for cron
     crate config   print the config file path
 
 | key | action |
@@ -74,6 +75,14 @@ Downloading happens for every source first, then one mirror and one reindex at
 the end. That matters when the link to the server is slow: one rsync pass
 instead of one per source.
 
+## Unattended
+
+`crate sync` performs one sync and exits, printing what it did. It takes the
+same path as the interface, so a cron entry keeps a library current without
+anyone watching:
+
+    0 4 * * *  /usr/local/bin/crate sync >> ~/.local/state/crate.log 2>&1
+
 ## Configuration
 
 `crate config` prints the path. It is created on first run.
@@ -108,6 +117,10 @@ The mirror deliberately does not use `--delete`. The server may hold music that
 did not come from crate, and quietly removing it would be rude.
 
 ## Notes
+
+Album playlists often carry no track numbers, which leaves a music server
+sorting a record alphabetically. crate falls back to the position in the
+playlist, which is the track order, so albums play in sequence.
 
 Filing depends on the metadata the source provides. When a source has no artist
 tag, crate falls back through several fields and finally to `Unknown Artist`.
