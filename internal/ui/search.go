@@ -65,7 +65,7 @@ func (a *App) addResult(r library.Result) {
 		name = "album: " + name
 	}
 
-	src := config.Source{Name: name, URL: r.URL}
+	src := config.Source{Name: name, URL: config.NormalizeURL(r.URL)}
 
 	a.mu.Lock()
 	for _, s := range a.cfg.Sources {
@@ -87,8 +87,11 @@ func (a *App) addResult(r library.Result) {
 		return
 	}
 	a.logf("added %s", name)
-	if config.IsEndlessMix(src.URL) {
+	switch {
+	case config.IsEndlessMix(src.URL):
 		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
+	case config.IsArtistChannel(src.URL):
+		a.logf("note: that is a whole artist catalogue, usually hundreds of tracks and several gigabytes")
 	}
 	a.redraw()
 

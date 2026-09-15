@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/adrg/xdg"
@@ -69,6 +70,35 @@ type Config struct {
 	KeepLocal *bool    `json:"keep_local,omitempty"`
 	Remote    Remote   `json:"remote"`
 	Sources   []Source `json:"sources"`
+}
+
+// artistHandle matches a youtube or youtube music channel handle url, with or
+// without a trailing tab.
+var artistHandle = regexp.MustCompile(`^https?://(?:www\.|music\.)?youtube\.com/(@[^/?#]+)(?:/([a-z]+))?`)
+
+// NormalizeURL rewrites a url to the form that yields the best metadata.
+//
+// An artist handle on its own lands on the Videos tab, which is music videos:
+// the audio has to be extracted from them and the titles are promotional
+// rather than track names. The releases tab is the same artist's albums and
+// singles, which carry real album and track tags.
+func NormalizeURL(raw string) string {
+	m := artistHandle.FindStringSubmatch(strings.TrimSpace(raw))
+	if m == nil {
+		return raw
+	}
+	// Only redirect a bare handle. An explicit tab is the caller's choice.
+	if m[2] != "" {
+		return raw
+	}
+	return "https://www.youtube.com/" + m[1] + "/releases"
+}
+
+// IsArtistChannel reports whether a url is a whole artist's catalogue, which
+// is hundreds of tracks rather than an album's worth.
+func IsArtistChannel(raw string) bool {
+	return artistHandle.MatchString(strings.TrimSpace(raw)) ||
+		strings.Contains(raw, "/channel/")
 }
 
 // IsEndlessMix reports whether a URL points at one of YouTube's generated

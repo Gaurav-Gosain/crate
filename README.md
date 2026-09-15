@@ -134,6 +134,20 @@ Staging is only cleared after a mirror actually succeeds. yt-dlp cannot write
 to the remote directly, since transcoding needs a real filesystem, so files are
 always staged first regardless of this setting.
 
+## Whole artists
+
+An artist handle works as a source:
+
+    https://music.youtube.com/@someartist
+
+crate rewrites a bare handle to that artist's releases tab, because a handle on
+its own resolves to Videos: music videos, where the audio has to be pulled out
+of a video and the titles are promotional rather than track names. The releases
+tab is the same artist's albums and singles, which carry real album and track
+tags. Name a tab yourself and crate leaves it alone.
+
+Expect hundreds of tracks and several gigabytes. crate says so when you add one.
+
 ## Endless mixes
 
 YouTube URLs containing `list=RD` are generated radio: they have no end and

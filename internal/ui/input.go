@@ -147,6 +147,11 @@ func (a *App) setCursor(i int) {
 // without the user having to name every playlist by hand.
 func (a *App) addSource(url string) {
 	name := deriveName(url)
+	if n := config.NormalizeURL(url); n != url {
+		a.logf("using the releases tab, which has album and track tags")
+		url = n
+		name = deriveName(url)
+	}
 	s := config.Source{Name: name, URL: url}
 
 	a.mu.Lock()
@@ -159,8 +164,11 @@ func (a *App) addSource(url string) {
 		return
 	}
 	a.logf("added %s", name)
-	if config.IsEndlessMix(url) {
+	switch {
+	case config.IsEndlessMix(url):
 		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
+	case config.IsArtistChannel(url):
+		a.logf("note: that is a whole artist catalogue, usually hundreds of tracks and several gigabytes")
 	}
 
 	// Adding a source and having nothing happen is not what anyone means by
