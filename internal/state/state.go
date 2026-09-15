@@ -30,6 +30,38 @@ const (
 
 type shared struct {
 	Sources []config.Source `json:"sources"`
+	// Removed carries the tombstones. Sources and tombstones have to travel
+	// together: merging two source lists without them turns every deletion
+	// into a temporary one, because whichever device still lists a source
+	// reintroduces it on its next push.
+	Removed map[string]string `json:"removed,omitempty"`
+}
+
+// merge combines the shared list with the local one. Sources are unioned so
+// that an addition on either side survives, then tombstoned entries are
+// dropped, so that a deletion on either side also survives. A tombstone is
+// beaten only by adding the source again, which clears it.
+func merge(remote shared, c *config.Config) []config.Source {
+	tombs := map[string]string{}
+	for k, v := range remote.Removed {
+		tombs[k] = v
+	}
+	for k, v := range c.Removed {
+		tombs[k] = v
+	}
+
+	var out []config.Source
+	seen := map[string]bool{}
+	for _, s := range append(append([]config.Source{}, remote.Sources...), c.Sources...) {
+		key := config.NormalizeURL(s.URL)
+		if seen[key] || tombs[key] != "" {
+			continue
+		}
+		seen[key] = true
+		out = append(out, s)
+	}
+	c.Removed = tombs
+	return out
 }
 
 // Pull copies shared state down and applies it to c.
@@ -59,7 +91,7 @@ func Pull(ctx context.Context, c *config.Config) error {
 	if err := json.Unmarshal(b, &sh); err != nil {
 		return fmt.Errorf("shared sources: %w", err)
 	}
-	c.Sources = sh.Sources
+	c.Sources = merge(sh, c)
 	return c.Save()
 }
 
@@ -69,7 +101,7 @@ func Push(ctx context.Context, c *config.Config) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(shared{Sources: c.Sources}, "", "  ")
+	b, err := json.MarshalIndent(shared{Sources: c.Sources, Removed: c.Removed}, "", "  ")
 	if err != nil {
 		return err
 	}

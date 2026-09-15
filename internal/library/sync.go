@@ -76,7 +76,7 @@ func Sync(ctx context.Context, c *config.Config, ev chan<- Event) error {
 		if m := speedRe.FindStringSubmatch(line); m != nil {
 			e.Speed = strings.TrimSpace(m[1])
 		}
-		ev <- e
+		send(ev, e)
 	}
 	return cmd.Wait()
 }

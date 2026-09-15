@@ -6,9 +6,11 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 	"github.com/Gaurav-Gosain/crate/internal/library"
+	"github.com/Gaurav-Gosain/crate/internal/state"
 )
 
 func (a *App) watchResize() {
@@ -155,6 +157,7 @@ func (a *App) addSource(url string) {
 	s := config.Source{Name: name, URL: url}
 
 	a.mu.Lock()
+	a.cfg.ClearRemoved(s.URL)
 	a.cfg.Sources = append(a.cfg.Sources, s)
 	a.rows = append(a.rows, row{src: s, state: idle})
 	a.mu.Unlock()
@@ -184,24 +187,52 @@ func (a *App) addSource(url string) {
 
 func (a *App) removeSelected() {
 	a.mu.Lock()
-	if len(a.rows) == 0 {
+	if len(a.rows) == 0 || a.busy {
 		a.mu.Unlock()
 		return
 	}
 	i := a.cursor
-	name := a.rows[i].src.Name
+	src := a.rows[i].src
 	a.rows = append(a.rows[:i], a.rows[i+1:]...)
 	a.cfg.Sources = append(a.cfg.Sources[:i], a.cfg.Sources[i+1:]...)
 	if a.cursor >= len(a.rows) {
 		a.cursor = max(len(a.rows)-1, 0)
 	}
+	// The tombstone is what makes the removal stick. Without it the next
+	// pull from the shared state finds the source still listed by another
+	// device and puts it straight back, music and all.
+	a.cfg.MarkRemoved(src.URL)
 	a.mu.Unlock()
 
 	if err := a.cfg.Save(); err != nil {
 		a.logf("could not save config: %v", err)
 		return
 	}
-	a.logf("removed %s", name)
+	a.logf("removed %s", src.Name)
+	a.redraw()
+
+	// Deleting the tracks needs the network, so it happens in the background.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := state.Push(ctx, a.cfg); err != nil {
+			a.logf("   could not publish removal: %v", err)
+		}
+		r, err := library.RemoveTracks(ctx, a.cfg, src, a.logf)
+		if err != nil {
+			a.logf("   could not remove tracks: %v", err)
+			return
+		}
+		if r.Files == 0 {
+			a.logf("   no tracks to remove")
+			return
+		}
+		a.logf("   removed %d track(s), kept %d shared by other sources", r.Files, r.Kept)
+		if err := library.TriggerScan(ctx, a.cfg); err != nil {
+			a.logf("   reindex failed: %v", err)
+		}
+		a.redraw()
+	}()
 }
 
 func deriveName(raw string) string {

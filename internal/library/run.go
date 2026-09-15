@@ -62,6 +62,20 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 		log("   sync failed: %v", err)
 		failures++
 	} else {
+		// Playlists are built after the mirror so the index they match
+		// against includes whatever this run just downloaded, and synced
+		// again afterwards because the .m3u files themselves are new.
+		log("== building playlists")
+		if pls, err := Playlists(ctx, c, ev); err != nil {
+			log("   playlists failed: %v", err)
+		} else if len(pls) > 0 {
+			for _, p := range pls {
+				log("   %s: %d/%d tracks", p.Name, p.Matched, p.Total)
+			}
+			if err := Sync(ctx, c, ev); err != nil {
+				log("   playlist sync failed: %v", err)
+			}
+		}
 		if err := TriggerScan(ctx, c); err != nil {
 			log("   reindex failed: %v", err)
 		}

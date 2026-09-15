@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/adrg/xdg"
 )
@@ -70,6 +71,30 @@ type Config struct {
 	KeepLocal *bool    `json:"keep_local,omitempty"`
 	Remote    Remote   `json:"remote"`
 	Sources   []Source `json:"sources"`
+	// Removed records sources that were deliberately deleted, keyed by
+	// normalised URL. Without it a removal cannot survive a round trip
+	// through the shared state: another device still listing the source
+	// would simply put it back, and the deleted music would return with it.
+	Removed map[string]string `json:"removed,omitempty"`
+}
+
+// MarkRemoved records a tombstone for a source.
+func (c *Config) MarkRemoved(url string) {
+	if c.Removed == nil {
+		c.Removed = map[string]string{}
+	}
+	c.Removed[NormalizeURL(url)] = time.Now().UTC().Format(time.RFC3339)
+}
+
+// IsRemoved reports whether a source was deliberately deleted.
+func (c *Config) IsRemoved(url string) bool {
+	_, ok := c.Removed[NormalizeURL(url)]
+	return ok
+}
+
+// ClearRemoved forgets a tombstone, so that adding a source back works.
+func (c *Config) ClearRemoved(url string) {
+	delete(c.Removed, NormalizeURL(url))
 }
 
 // artistHandle matches a youtube or youtube music channel handle url, with or

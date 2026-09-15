@@ -75,6 +75,7 @@ func (a *App) addResult(r library.Result) {
 			return
 		}
 	}
+	a.cfg.ClearRemoved(src.URL)
 	a.cfg.Sources = append(a.cfg.Sources, src)
 	a.rows = append(a.rows, row{src: src, state: idle})
 	a.mode = modeList

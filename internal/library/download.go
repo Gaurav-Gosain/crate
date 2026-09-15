@@ -25,6 +25,7 @@ const (
 	PhaseConverting
 	PhaseTagging
 	PhaseMirroring
+	PhasePlaylisting
 )
 
 func (p Phase) String() string {
@@ -37,6 +38,8 @@ func (p Phase) String() string {
 		return "tagging"
 	case PhaseMirroring:
 		return "mirroring"
+	case PhasePlaylisting:
+		return "playlists"
 	}
 	return "idle"
 }
@@ -184,15 +187,26 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		"--audio-quality", c.Quality,
 		"--embed-metadata",
 		"--embed-thumbnail",
+		// The metadata pass runs "ffmpeg -map 0 -c copy", which tries to copy
+		// every stream including the cover art that --embed-thumbnail added.
+		// An opus file cannot carry a PNG stream through the ogg muxer, so
+		// ffmpeg refuses with "Unsupported codec id in stream 1" and yt-dlp
+		// reports "Conversion failed!". That only bites on a second pass over
+		// a file that already has a cover, and it is self sustaining: the
+		// failure stops the download being recorded in the archive, so the
+		// next run tries the same file and fails the same way forever.
+		// Dropping video for the metadata write sidesteps it; the thumbnail
+		// is re-attached afterwards by the embed step, which uses mutagen.
+		"--postprocessor-args", "Metadata:-vn",
 		// Split each file into parallel fragment downloads as well, which
 		// helps when a shard has only one long track.
 		"--concurrent-fragments", "4",
 		"--parse-metadata", "%(title)s:%(?P<artist>.+?) - (?P<track>.+)",
-		"--parse-metadata", "%(playlist_title,album)s:%(album)s",
+		"--parse-metadata", "%(playlist_title,album|)s:%(album)s",
 		// Album playlists often carry no track numbers, which leaves a
 		// music server sorting the record alphabetically. The position in
 		// the playlist is the track order, so fall back to it.
-		"--parse-metadata", "%(track_number,playlist_index)s:%(track_number)s",
+		"--parse-metadata", "%(track_number,playlist_index|)s:%(track_number)s",
 		// Some hosts put an uploader email where the artist belongs, which
 		// produced folders like "alan@smithee.com".
 		"--replace-in-metadata", "artist,album_artist,uploader,channel",
@@ -202,6 +216,10 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		// music server's artist list.
 		"--replace-in-metadata", "artist,album_artist",
 		`(?i)^\s*(na|n/a|none|null|unknown|various artists?)\s*$`, "Unknown Artist",
+		// Same placeholder, but an empty album is better than an album
+		// literally called "NA" showing up in the music server.
+		"--replace-in-metadata", "album,track",
+		`(?i)^\s*(na|n/a|none|null)\s*$`, "",
 		// Drop the video description, synopsis, comment and url. They carry
 		// the entire youtube blurb, which bloats every file and buries the
 		// fields a music server actually reads.
@@ -212,7 +230,7 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		// Album artist drives grouping. Take the first credited name rather
 		// than the whole comma joined list, so a record lands under one
 		// artist instead of inventing one per combination of collaborators.
-		"--parse-metadata", "%(artist,album_artist,creator)s:(?P<meta_album_artist>[^,;/]+)",
+		"--parse-metadata", "%(artist,album_artist,creator|)s:(?P<meta_album_artist>[^,;/]+)",
 		"--paths", dest,
 		"--output", outputTemplate,
 		"--trim-filenames", "180",
