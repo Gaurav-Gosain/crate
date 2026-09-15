@@ -106,6 +106,41 @@ anyone watching:
 
     0 4 * * *  /usr/local/bin/crate sync >> ~/.local/state/crate.log 2>&1
 
+## More than one machine
+
+The sources list and the download archive are shared, not per laptop. Without
+that, a second machine has no idea what the first one already fetched and
+downloads the entire library again.
+
+Both live next to the music on the same remote, under `.crate-state`, which is
+outside the music root so the music server does not try to index it. crate
+pulls that state when it starts and publishes it after a sync. If the remote is
+itself backed up, the state inherits that backup rather than needing a second
+set of credentials.
+
+First machine to run simply finds nothing to pull, and its own state becomes
+the shared one.
+
+## Keeping no local copy
+
+Set `keep_local` to `false` and the library becomes a staging area: files are
+downloaded, mirrored, then removed locally. The remote is the only copy, so the
+two cannot drift apart, and nothing has to reconcile them.
+
+The archive lives beside the config rather than inside the library, so clearing
+staged files never destroys the record of what was already fetched.
+
+Staging is only cleared after a mirror actually succeeds. yt-dlp cannot write
+to the remote directly, since transcoding needs a real filesystem, so files are
+always staged first regardless of this setting.
+
+## Endless mixes
+
+YouTube URLs containing `list=RD` are generated radio: they have no end and
+keep proposing tracks. Adding one as a source pulls in hundreds of files rather
+than an album's worth. crate says so when you add one, but it will still fetch
+what you asked for.
+
 ## Configuration
 
 `crate config` prints the path. It is created on first run.
@@ -116,12 +151,14 @@ anyone watching:
   "format": "opus",
   "quality": "0",
   "parallel": 8,
+  "keep_local": true,
   "remote": {
     "host": "music-server",
     "path": "/var/lib/music",
     "scan_url": "https://music.example.com",
     "scan_user": "you",
-    "scan_pass": "secret"
+    "scan_pass": "secret",
+    "state": ""
   },
   "sources": []
 }

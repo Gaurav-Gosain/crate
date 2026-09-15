@@ -159,6 +159,9 @@ func (a *App) addSource(url string) {
 		return
 	}
 	a.logf("added %s", name)
+	if config.IsEndlessMix(url) {
+		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
+	}
 
 	// Adding a source and having nothing happen is not what anyone means by
 	// adding it, so fetch it straight away. Syncing the whole library again

@@ -61,8 +61,15 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 	if err := Sync(ctx, c, ev); err != nil {
 		log("   sync failed: %v", err)
 		failures++
-	} else if err := TriggerScan(ctx, c); err != nil {
-		log("   reindex failed: %v", err)
+	} else {
+		if err := TriggerScan(ctx, c); err != nil {
+			log("   reindex failed: %v", err)
+		}
+		if n, err := ClearStaging(c); err != nil {
+			log("   could not clear staging: %v", err)
+		} else if n > 0 {
+			log("   cleared %d staged item(s); the remote is the only copy", n)
+		}
 	}
 
 	close(ev)

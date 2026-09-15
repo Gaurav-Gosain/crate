@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -135,4 +137,33 @@ func TriggerScan(ctx context.Context, c *config.Config) error {
 		return fmt.Errorf("scan trigger: http %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// ClearStaging empties the local library after a successful mirror.
+//
+// Only call this once the mirror has succeeded. With KeepLocal off the remote
+// is the only copy, so clearing before a confirmed push would lose the
+// download. The archive lives beside the config, not in here, so what has
+// already been fetched survives.
+func ClearStaging(c *config.Config) (int, error) {
+	if c.Keep() {
+		return 0, nil
+	}
+	root := c.Library
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		// Never touch dotfiles: older versions kept the archive in here.
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }

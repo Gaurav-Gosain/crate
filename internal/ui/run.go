@@ -9,6 +9,7 @@ import (
 	"github.com/Gaurav-Gosain/crate/internal/config"
 
 	"github.com/Gaurav-Gosain/crate/internal/library"
+	"github.com/Gaurav-Gosain/crate/internal/state"
 )
 
 func (a *App) setRow(i int, fn func(*row)) {
@@ -181,10 +182,19 @@ func (a *App) run(idx []int) {
 		} else if a.cfg.Remote.ScanURL != "" {
 			a.logf("server rescanning")
 		}
+		if n, err := library.ClearStaging(a.cfg); err != nil {
+			a.logf("could not clear staging: %v", err)
+		} else if n > 0 {
+			a.logf("cleared %d staged item(s); the remote is the only copy", n)
+		}
 	}
 
 	close(ev)
 	<-done
+
+	if err := state.Push(ctx, a.cfg); err != nil {
+		a.logf("could not publish shared state: %v", err)
+	}
 
 	if failures == 0 {
 		a.logf("done, everything up to date")

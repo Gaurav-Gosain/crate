@@ -87,6 +87,9 @@ func (a *App) addResult(r library.Result) {
 		return
 	}
 	a.logf("added %s", name)
+	if config.IsEndlessMix(src.URL) {
+		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
+	}
 	a.redraw()
 
 	a.mu.Lock()
