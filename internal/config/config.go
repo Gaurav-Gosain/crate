@@ -66,8 +66,10 @@ type Config struct {
 	// the core count.
 	Parallel int `json:"parallel"`
 	// KeepLocal decides whether downloaded files stay on this machine after
-	// they have been mirrored. With it off the library is a staging area:
-	// the remote is the only copy, so the two cannot drift apart.
+	// they have been mirrored. It is off by default, which makes the library
+	// a staging area: the remote is the only copy, so there is one source of
+	// truth and the two cannot drift apart. Turn it on to also keep an
+	// offline copy, and accept that the two can then disagree.
 	KeepLocal *bool    `json:"keep_local,omitempty"`
 	Remote    Remote   `json:"remote"`
 	Sources   []Source `json:"sources"`
@@ -139,7 +141,7 @@ func Path() string {
 
 func defaults() Config {
 	return Config{
-		Library:  filepath.Join(xdg.UserDirs.Music, "crate"),
+		Library:  filepath.Join(xdg.CacheHome, "crate", "staging"),
 		Format:   "opus",
 		Quality:  "0",
 		Parallel: 8,
@@ -193,7 +195,7 @@ func (c *Config) Save() error {
 // Keep reports whether to retain local files after mirroring. It defaults to
 // true, because throwing away a user's only copy should be opt in.
 func (c *Config) Keep() bool {
-	return c.KeepLocal == nil || *c.KeepLocal
+	return c.KeepLocal != nil && *c.KeepLocal
 }
 
 // ArchivePath is yt-dlp's download archive: the record of what has already

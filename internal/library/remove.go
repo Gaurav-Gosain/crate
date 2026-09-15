@@ -56,7 +56,7 @@ func RemoveTracks(ctx context.Context, c *config.Config, s config.Source, log fu
 	}
 
 	// Anything still named by another source's playlist is spoken for.
-	keep := claimedElsewhere(c, self)
+	keep := claimedElsewhere(ctx, c, self)
 
 	var (
 		paths []string
@@ -113,32 +113,33 @@ func RemoveTracks(ctx context.Context, c *config.Config, s config.Source, log fu
 
 // claimedElsewhere collects every path named by a playlist other than this
 // source's, so shared tracks survive the removal. The generated .m3u files are
-// used as the record of what belongs to whom, which avoids re-resolving every
-// other source over the network just to delete one.
-func claimedElsewhere(c *config.Config, self string) map[string]bool {
+// the record of what belongs to whom, which avoids re-resolving every other
+// source over the network just to delete one.
+//
+// They are read from the remote rather than from the local library, because
+// the local library may be staging that was emptied after the last mirror. On
+// this path an empty answer is not harmless: it would mean deleting a track
+// that another source still wants.
+func claimedElsewhere(ctx context.Context, c *config.Config, self string) map[string]bool {
 	keep := map[string]bool{}
-	ents, err := os.ReadDir(c.Library)
+	root := strings.TrimSuffix(c.Remote.Path, "/")
+	script := fmt.Sprintf(`for f in %q/*.m3u; do [ -e "$f" ] || continue; echo "==$(basename "$f")"; cat "$f"; done`, root)
+	out, err := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", c.Remote.Host, script).Output()
 	if err != nil {
 		return keep
 	}
-	for _, e := range ents {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".m3u") {
+	skip := false
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if name, ok := strings.CutPrefix(line, "=="); ok {
+			skip = name == self+".m3u"
 			continue
 		}
-		if e.Name() == self+".m3u" {
+		line = strings.TrimSpace(line)
+		if skip || line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(c.Library, e.Name()))
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			keep[line] = true
-		}
+		keep[line] = true
 	}
 	return keep
 }

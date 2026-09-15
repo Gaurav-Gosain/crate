@@ -139,40 +139,101 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		n = 1
 	}
 
+	groups := plan(ctx, s, n)
+
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		errs []error
 	)
-	for k := 0; k < n; k++ {
+	for _, g := range groups {
 		wg.Add(1)
-		go func(k int) {
+		go func(g work) {
 			defer wg.Done()
-			// A single item still works with a stride: worker 0 takes it and
-			// the rest find nothing to do and exit immediately.
-			shard := ""
-			if n > 1 {
-				shard = fmt.Sprintf("%d::%d", k+1, n)
-			}
-			if err := downloadShard(ctx, c, s, dest, shard, ev); err != nil {
+			if err := downloadShard(ctx, c, s, dest, g.shard, g.urls, ev); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
 			}
-		}(k)
+		}(g)
 	}
 	wg.Wait()
 
 	// yt-dlp exits non-zero when a shard selects no items, which is normal
 	// for the trailing workers on a short playlist. Only report a failure if
 	// every shard failed.
-	if len(errs) == n {
+	if len(errs) == len(groups) && len(groups) > 0 {
 		return errs[0]
 	}
 	return nil
 }
 
-func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest, shard string, ev chan<- Event) error {
+// work is one yt-dlp invocation: the urls to fetch and, for a flat playlist,
+// the slice of it this worker is responsible for.
+type work struct {
+	urls  []string
+	shard string
+}
+
+// plan divides a source between n workers.
+//
+// --playlist-items applies to every playlist yt-dlp opens, nested ones
+// included. An artist's releases tab is a list of albums, so striding over it
+// takes every nth album and then every nth track inside each of those albums:
+// most of the music is never fetched, and because the arithmetic is the same
+// every time, running the sync again selects the same fraction and the gaps
+// never fill. Sources like that are split by album instead, one disjoint set
+// of whole albums per worker, with no item selection in play.
+//
+// A flat playlist has no nesting to leak into, so it keeps the stride, which
+// also keeps each process inside the playlist: album and track-number
+// metadata come from that context and would be lost if items were fetched as
+// standalone URLs.
+func plan(ctx context.Context, s config.Source, n int) []work {
+	url := config.NormalizeURL(s.URL)
+
+	var albums []string
+	if top, err := listing(ctx, url); err == nil {
+		for _, e := range top {
+			if e.nested {
+				albums = append(albums, "https://www.youtube.com/playlist?list="+e.id)
+			}
+		}
+	}
+
+	if len(albums) == 0 {
+		var out []work
+		for k := 0; k < n; k++ {
+			shard := ""
+			if n > 1 {
+				shard = fmt.Sprintf("%d::%d", k+1, n)
+			}
+			out = append(out, work{urls: []string{url}, shard: shard})
+		}
+		return out
+	}
+
+	return shardAlbums(albums, n)
+}
+
+// shardAlbums deals whole albums out between n workers. Every album must land
+// in exactly one worker's hand: one missed album is an album of music that
+// never downloads.
+func shardAlbums(albums []string, n int) []work {
+	var out []work
+	for k := 0; k < n; k++ {
+		var g []string
+		for i := k; i < len(albums); i += n {
+			g = append(g, albums[i])
+		}
+		if len(g) > 0 {
+			out = append(out, work{urls: g})
+		}
+	}
+	return out
+}
+
+func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest, shard string, urls []string, ev chan<- Event) error {
 	args := []string{
 		"--no-colors",
 		"--newline",
@@ -238,7 +299,7 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 	if shard != "" {
 		args = append(args, "--playlist-items", shard)
 	}
-	args = append(args, s.URL)
+	args = append(args, urls...)
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	stdout, err := cmd.StdoutPipe()
