@@ -193,6 +193,26 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		// music server sorting the record alphabetically. The position in
 		// the playlist is the track order, so fall back to it.
 		"--parse-metadata", "%(track_number,playlist_index)s:%(track_number)s",
+		// Some hosts put an uploader email where the artist belongs, which
+		// produced folders like "alan@smithee.com".
+		"--replace-in-metadata", "artist,album_artist,uploader,channel",
+		`^\S+@\S+\.\S+$`, "Unknown Artist",
+		// Placeholders are not artists. yt-dlp hands back a literal "NA" when
+		// a field is absent, which then becomes a folder and an entry in the
+		// music server's artist list.
+		"--replace-in-metadata", "artist,album_artist",
+		`(?i)^\s*(na|n/a|none|null|unknown|various artists?)\s*$`, "Unknown Artist",
+		// Drop the video description, synopsis, comment and url. They carry
+		// the entire youtube blurb, which bloats every file and buries the
+		// fields a music server actually reads.
+		"--parse-metadata", ":(?P<meta_description>)",
+		"--parse-metadata", ":(?P<meta_synopsis>)",
+		"--parse-metadata", ":(?P<meta_comment>)",
+		"--parse-metadata", ":(?P<meta_purl>)",
+		// Album artist drives grouping. Take the first credited name rather
+		// than the whole comma joined list, so a record lands under one
+		// artist instead of inventing one per combination of collaborators.
+		"--parse-metadata", "%(artist,album_artist,creator)s:(?P<meta_album_artist>[^,;/]+)",
 		"--paths", dest,
 		"--output", outputTemplate,
 		"--trim-filenames", "180",
