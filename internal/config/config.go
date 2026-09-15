@@ -39,9 +39,13 @@ type Config struct {
 	// Format is passed to yt-dlp's --audio-format.
 	Format string `json:"format"`
 	// Quality is yt-dlp's --audio-quality, 0 is best.
-	Quality string   `json:"quality"`
-	Remote  Remote   `json:"remote"`
-	Sources []Source `json:"sources"`
+	Quality string `json:"quality"`
+	// Parallel bounds how many yt-dlp processes run at once, across all
+	// sources. Downloads are network bound, so this can comfortably exceed
+	// the core count.
+	Parallel int      `json:"parallel"`
+	Remote   Remote   `json:"remote"`
+	Sources  []Source `json:"sources"`
 }
 
 func Path() string {
@@ -50,9 +54,10 @@ func Path() string {
 
 func defaults() Config {
 	return Config{
-		Library: filepath.Join(xdg.UserDirs.Music, "crate"),
-		Format:  "opus",
-		Quality: "0",
+		Library:  filepath.Join(xdg.UserDirs.Music, "crate"),
+		Format:   "opus",
+		Quality:  "0",
+		Parallel: 8,
 	}
 }
 
@@ -79,6 +84,9 @@ func Load() (*Config, error) {
 	}
 	if c.Format == "" {
 		c.Format = defaults().Format
+	}
+	if c.Parallel < 1 {
+		c.Parallel = defaults().Parallel
 	}
 	return &c, nil
 }

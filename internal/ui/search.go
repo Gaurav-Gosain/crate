@@ -88,6 +88,11 @@ func (a *App) addResult(r library.Result) {
 	}
 	a.logf("added %s", name)
 	a.redraw()
+
+	a.mu.Lock()
+	idx := len(a.rows) - 1
+	a.mu.Unlock()
+	a.run([]int{idx})
 }
 
 func (a *App) handleSearchKey(c byte) bool {

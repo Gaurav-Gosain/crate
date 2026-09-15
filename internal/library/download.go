@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 )
@@ -41,6 +42,12 @@ const outputTemplate = `%(artist,album_artist,creator,uploader,channel|Unknown A
 // The download archive makes this incremental: tracks already recorded there
 // are skipped without touching the network, so running a sync repeatedly is
 // cheap and safe.
+//
+// Work is split across c.Parallel yt-dlp processes using strided playlist
+// selection, so worker k of n takes items k+1, k+1+n, k+1+2n and so on. This
+// keeps each process inside the playlist, which matters because album and
+// track-number metadata come from that context and would be lost if items
+// were fetched as standalone URLs.
 func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- Event) error {
 	dest := c.Library
 	if s.Dir != "" {
@@ -50,35 +57,76 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		return err
 	}
 
+	n := c.Parallel
+	if n < 1 {
+		n = 1
+	}
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	for k := 0; k < n; k++ {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			// A single item still works with a stride: worker 0 takes it and
+			// the rest find nothing to do and exit immediately.
+			shard := ""
+			if n > 1 {
+				shard = fmt.Sprintf("%d::%d", k+1, n)
+			}
+			if err := downloadShard(ctx, c, s, dest, shard, ev); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(k)
+	}
+	wg.Wait()
+
+	// yt-dlp exits non-zero when a shard selects no items, which is normal
+	// for the trailing workers on a short playlist. Only report a failure if
+	// every shard failed.
+	if len(errs) == n {
+		return errs[0]
+	}
+	return nil
+}
+
+func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest, shard string, ev chan<- Event) error {
 	args := []string{
 		"--no-colors",
 		"--newline",
 		"--ignore-errors",
 		"--no-overwrites",
+		// Shared across the parallel workers. yt-dlp appends one short line
+		// per download with O_APPEND, which is atomic below PIPE_BUF, so the
+		// concurrent writes do not interleave.
 		"--download-archive", c.ArchivePath(),
 		"--extract-audio",
 		"--audio-format", c.Format,
 		"--audio-quality", c.Quality,
 		"--embed-metadata",
 		"--embed-thumbnail",
-		// Videos carry a title but rarely clean artist/track tags. Splitting
-		// "Artist - Track" gives the music server something to group on.
+		// Split each file into parallel fragment downloads as well, which
+		// helps when a shard has only one long track.
+		"--concurrent-fragments", "4",
 		"--parse-metadata", "%(title)s:%(?P<artist>.+?) - (?P<track>.+)",
 		"--parse-metadata", "%(playlist_title,album)s:%(album)s",
 		// Album playlists often carry no track numbers, which leaves a
 		// music server sorting the record alphabetically. The position in
 		// the playlist is the track order, so fall back to it.
 		"--parse-metadata", "%(track_number,playlist_index)s:%(track_number)s",
-		// Some hosts put an uploader email where the artist belongs, which
-		// produced folders like "alan@smithee.com". Anything shaped like an
-		// address is not an artist name.
-		"--replace-in-metadata", "artist,album_artist,uploader,channel",
-		`^\S+@\S+\.\S+$`, "Unknown Artist",
 		"--paths", dest,
 		"--output", outputTemplate,
 		"--trim-filenames", "180",
-		s.URL,
 	}
+	if shard != "" {
+		args = append(args, "--playlist-items", shard)
+	}
+	args = append(args, s.URL)
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	stdout, err := cmd.StdoutPipe()

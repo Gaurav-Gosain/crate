@@ -28,7 +28,7 @@ Requires `yt-dlp`, `ffmpeg` and `rsync` on PATH.
 | key | action |
 |---|---|
 | `/` | search YouTube Music |
-| `a` | add a source by URL |
+| `a` | add a source by URL and fetch it |
 | `d` | remove the selected source |
 | `s` | sync everything |
 | `enter` | sync the selected source |
@@ -59,6 +59,29 @@ there is nothing to download. Paste a Spotify link and nothing will happen.
 Anything you drop into the library directory is mirrored on the next sync,
 tagged or not. crate does not need to have downloaded a file to look after it,
 so an existing collection can be copied in and will sync alongside the rest.
+
+## Speed
+
+Downloads run in parallel at two levels: sources fetch concurrently, and each
+source is split across several yt-dlp processes using strided playlist
+selection, so worker k of n takes items k+1, k+1+n and so on. A single
+semaphore bounds the total process count, because n sources each fanning out
+to n workers would otherwise start n squared of them.
+
+Striding keeps every worker inside the playlist rather than fetching items as
+standalone URLs, which matters: album and track-number metadata come from that
+context and would be lost otherwise.
+
+Measured on an 11 track album:
+
+| `parallel` | time |
+|---|---|
+| 1 | 25.8s |
+| 4 | 11.2s |
+| 8 | 9.3s |
+
+The default is 8. Lower it in the config on a machine where transcoding
+competes for cores.
 
 ## How a sync works
 
@@ -92,6 +115,7 @@ anyone watching:
   "library": "/Users/you/Music/crate",
   "format": "opus",
   "quality": "0",
+  "parallel": 8,
   "remote": {
     "host": "music-server",
     "path": "/var/lib/music",

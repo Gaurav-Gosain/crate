@@ -3,6 +3,9 @@ package ui
 import (
 	"context"
 	"strings"
+	"sync"
+
+	"github.com/Gaurav-Gosain/crate/internal/config"
 
 	"github.com/Gaurav-Gosain/crate/internal/library"
 )
@@ -85,7 +88,15 @@ func (a *App) run(idx []int) {
 		}
 	}()
 
-	failures := 0
+	// Sources download concurrently, each internally sharded. The semaphore
+	// bounds the total number of yt-dlp processes; without it n sources each
+	// fanning out to n workers would start n squared of them.
+	sem := make(chan struct{}, a.cfg.Parallel)
+	var (
+		wg       sync.WaitGroup
+		fmu      sync.Mutex
+		failures int
+	)
 	for _, i := range idx {
 		a.mu.Lock()
 		if i >= len(a.rows) {
@@ -95,34 +106,44 @@ func (a *App) run(idx []int) {
 		src := a.rows[i].src
 		a.mu.Unlock()
 
-		a.setRow(i, func(r *row) { r.state = running; r.pct = -1; r.detail = "fetching" })
-		a.logf("── %s", src.Name)
+		wg.Add(1)
+		go func(i int, src config.Source) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		// Forward percentages to this row while it runs.
-		rowEv := make(chan library.Event, 64)
-		relay := make(chan struct{})
-		go func(i int) {
-			defer close(relay)
-			for e := range rowEv {
-				if e.Pct >= 0 {
-					a.setRow(i, func(r *row) { r.pct = e.Pct })
+			a.setRow(i, func(r *row) { r.state = running; r.pct = -1; r.detail = "fetching" })
+			a.logf("── %s", src.Name)
+
+			// Forward percentages to this row while it runs.
+			rowEv := make(chan library.Event, 64)
+			relay := make(chan struct{})
+			go func() {
+				defer close(relay)
+				for e := range rowEv {
+					if e.Pct >= 0 {
+						a.setRow(i, func(r *row) { r.pct = e.Pct })
+					}
+					ev <- e
 				}
-				ev <- e
+			}()
+
+			err := library.Download(ctx, a.cfg, src, rowEv)
+			close(rowEv)
+			<-relay
+
+			if err != nil {
+				fmu.Lock()
+				failures++
+				fmu.Unlock()
+				a.setRow(i, func(r *row) { r.state = failed; r.detail = err.Error() })
+				a.logf("%s failed: %v", src.Name, err)
+				return
 			}
-		}(i)
-
-		err := library.Download(ctx, a.cfg, src, rowEv)
-		close(rowEv)
-		<-relay
-
-		if err != nil {
-			failures++
-			a.setRow(i, func(r *row) { r.state = failed; r.detail = err.Error() })
-			a.logf("%s failed: %v", src.Name, err)
-			continue
-		}
-		a.setRow(i, func(r *row) { r.state = succeeded; r.pct = -1; r.detail = "downloaded" })
+			a.setRow(i, func(r *row) { r.state = succeeded; r.pct = -1; r.detail = "downloaded" })
+		}(i, src)
 	}
+	wg.Wait()
 
 	a.logf("── mirroring to %s", a.cfg.Remote.Host)
 	if err := library.Sync(ctx, a.cfg, ev); err != nil {

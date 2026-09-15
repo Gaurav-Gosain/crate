@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 )
@@ -30,14 +31,31 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 		}
 	}()
 
-	var failures int
+	// Sources run concurrently as well as being sharded internally. The
+	// semaphore is what actually bounds process count: without it, n sources
+	// each fanning out to n workers would start n squared yt-dlp processes.
+	sem := make(chan struct{}, c.Parallel)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		failures int
+	)
 	for _, s := range c.Sources {
-		log("== %s", s.Name)
-		if err := Download(ctx, c, s, ev); err != nil {
-			log("   failed: %v", err)
-			failures++
-		}
+		wg.Add(1)
+		go func(s config.Source) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			log("== %s", s.Name)
+			if err := Download(ctx, c, s, ev); err != nil {
+				mu.Lock()
+				failures++
+				mu.Unlock()
+				log("   %s failed: %v", s.Name, err)
+			}
+		}(s)
 	}
+	wg.Wait()
 
 	log("== mirroring to %s", c.Remote.Host)
 	if err := Sync(ctx, c, ev); err != nil {

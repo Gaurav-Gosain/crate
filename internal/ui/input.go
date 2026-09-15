@@ -159,6 +159,16 @@ func (a *App) addSource(url string) {
 		return
 	}
 	a.logf("added %s", name)
+
+	// Adding a source and having nothing happen is not what anyone means by
+	// adding it, so fetch it straight away. Syncing the whole library again
+	// later is free for anything already in the download archive.
+	a.mu.Lock()
+	idx := len(a.rows) - 1
+	a.cursor = idx
+	a.mu.Unlock()
+	a.redraw()
+	a.run([]int{idx})
 }
 
 func (a *App) removeSelected() {
