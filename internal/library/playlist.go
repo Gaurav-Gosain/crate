@@ -139,20 +139,23 @@ type entry struct {
 	id       string
 	title    string
 	playlist string
+	// nested marks an entry that is itself a playlist rather than a track.
+	nested bool
 }
 
-// resolve lists a source's tracks without downloading anything.
-func resolve(ctx context.Context, s config.Source) ([]entry, error) {
+// listing runs one flat listing. Flat means yt-dlp reports what a page
+// contains without opening any of it, which is fast but only goes one level.
+func listing(ctx context.Context, url string) ([]entry, error) {
 	cmd := exec.CommandContext(ctx, "yt-dlp",
 		"--flat-playlist",
 		"--ignore-errors",
 		"--no-warnings",
-		"--print", "%(id)s\t%(playlist_title|)s\t%(track,title|)s",
-		config.NormalizeURL(s.URL),
+		"--print", "%(ie_key)s\t%(id)s\t%(playlist_title|)s\t%(track,title|)s",
+		url,
 	)
 	out, err := cmd.Output()
 	if err != nil && len(out) == 0 {
-		return nil, fmt.Errorf("resolve %s: %w", s.Name, err)
+		return nil, fmt.Errorf("resolve %s: %w", url, err)
 	}
 
 	var entries []entry
@@ -161,13 +164,91 @@ func resolve(ctx context.Context, s config.Source) ([]entry, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 || strings.TrimSpace(parts[2]) == "" {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) != 4 {
 			continue
 		}
-		entries = append(entries, entry{id: parts[0], playlist: parts[1], title: parts[2]})
+		e := entry{id: parts[1], playlist: parts[2], title: parts[3]}
+		// YoutubeTab is the extractor for anything that is a page of other
+		// things: a playlist, an album, a channel tab.
+		e.nested = parts[0] == "YoutubeTab"
+		if !e.nested && strings.TrimSpace(e.title) == "" {
+			continue
+		}
+		entries = append(entries, e)
 	}
 	return entries, nil
+}
+
+// resolve lists a source's tracks without downloading anything.
+//
+// One flat listing is not always enough. An artist's releases tab is a list of
+// albums, not of songs, so a single pass returns 146 album names for an artist
+// with 146 records and none of them is a track. Anything that is itself a
+// playlist gets opened once more, which turns the albums into their tracks.
+func resolve(ctx context.Context, s config.Source) ([]entry, error) {
+	top, err := listing(ctx, config.NormalizeURL(s.URL))
+	if err != nil {
+		return nil, err
+	}
+
+	// The name of the source as a whole, which the tracks of an expanded
+	// album must keep: the playlist is "Karan Aujla - Releases", not one
+	// entry per record.
+	outer := ""
+	for _, e := range top {
+		if e.playlist != "" {
+			outer = e.playlist
+			break
+		}
+	}
+
+	var (
+		flat   []entry
+		albums []entry
+	)
+	for _, e := range top {
+		if e.nested {
+			albums = append(albums, e)
+			continue
+		}
+		flat = append(flat, e)
+	}
+	if len(albums) == 0 {
+		return flat, nil
+	}
+
+	// Each album is an independent network round trip, so they run together.
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, 12)
+	)
+	for _, a := range albums {
+		wg.Add(1)
+		go func(a entry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			inner, err := listing(ctx, "https://www.youtube.com/playlist?list="+a.id)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range inner {
+				if e.nested {
+					continue
+				}
+				if outer != "" {
+					e.playlist = outer
+				}
+				flat = append(flat, e)
+			}
+		}(a)
+	}
+	wg.Wait()
+	return flat, nil
 }
 
 // Playlist is the outcome of building one source's playlist.
