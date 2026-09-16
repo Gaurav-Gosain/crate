@@ -408,6 +408,14 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	lyr, lyrNote := a.lyrics, a.lyricsNote
 	a.mu.Unlock()
 
+	// A pane with nothing in it should not hold space open. Plenty of tracks
+	// have no timed words, and reserving a third of the screen to say so
+	// takes it from the panes that do have something to show. The pane
+	// appears when words arrive and is simply absent when they do not.
+	if lyr == nil || len(lyr.Lines) == 0 {
+		panes.lyrics = false
+	}
+
 	top := 3
 	contentH := h - top - 1
 	if contentH < 8 {

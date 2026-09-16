@@ -55,24 +55,28 @@ type Spectrum struct {
 	agc    float64
 	window []float64
 	ready  bool
-	err    error
+	// done marks the decoder finished, so a position past the end of the
+	// audio can be told apart from one that simply has not arrived yet.
+	done bool
+	err  error
 }
 
-// Analyse decodes a file in the background and returns immediately. The bars
-// read empty until it finishes, which for a typical track is a second or two.
+// Analyse starts decoding a file in the background and returns immediately.
+//
+// Samples are taken as they arrive rather than waiting for the whole track.
+// The first version called ffmpeg and waited for it to finish, which for a
+// streamed track means downloading all of it before a single bar can be
+// drawn: switching songs left the display dead for as long as that took,
+// with the download competing for the same connection the music was
+// arriving on.
 func Analyse(ctx context.Context, path string) *Spectrum {
 	s := &Spectrum{window: hann(fftSize)}
-	go func() {
-		samples, err := decode(ctx, path)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.samples, s.err, s.ready = samples, err, err == nil
-	}()
+	go s.decodeInto(ctx, path)
 	return s
 }
 
-// decode runs ffmpeg and reads raw mono PCM from its stdout.
-func decode(ctx context.Context, path string) ([]float64, error) {
+// decodeInto streams raw mono PCM out of ffmpeg, appending as it comes.
+func (s *Spectrum) decodeInto(ctx context.Context, path string) {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error",
 		"-i", path,
@@ -84,24 +88,83 @@ func decode(ctx context.Context, path string) ([]float64, error) {
 	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("decode for visualiser: %s", bytes.TrimSpace(stderr.Bytes()))
+		s.fail(err)
+		return
 	}
-	n := len(out) / 2
-	samples := make([]float64, n)
-	for i := 0; i < n; i++ {
-		v := int16(binary.LittleEndian.Uint16(out[i*2:]))
-		samples[i] = float64(v) / 32768.0
+	if err := cmd.Start(); err != nil {
+		s.fail(err)
+		return
 	}
-	return samples, nil
+
+	buf := make([]byte, 64*1024)
+	// A read can end between the two bytes of a sample. The odd byte is
+	// carried into the next read rather than dropped, which would swap the
+	// byte order of everything after it and turn the rest into noise.
+	var carry []byte
+	for {
+		n, rerr := stdout.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if len(carry) > 0 {
+				chunk = append(carry, chunk...)
+				carry = nil
+			}
+			if odd := len(chunk) % 2; odd != 0 {
+				carry = append(carry, chunk[len(chunk)-odd:]...)
+				chunk = chunk[:len(chunk)-odd]
+			}
+			s.appendSamples(chunk)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+
+	werr := cmd.Wait()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.done = true
+	if werr != nil && len(s.samples) == 0 {
+		s.err = fmt.Errorf("decode for visualiser: %s", bytes.TrimSpace(stderr.Bytes()))
+	}
 }
 
-// Ready reports whether decoding has finished.
+// appendSamples adds decoded audio and marks the spectrum usable as soon as
+// there is a window's worth to transform.
+func (s *Spectrum) appendSamples(chunk []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := 0; i+1 < len(chunk); i += 2 {
+		v := int16(binary.LittleEndian.Uint16(chunk[i:]))
+		s.samples = append(s.samples, float64(v)/32768.0)
+	}
+	if len(s.samples) >= fftSize {
+		s.ready = true
+	}
+}
+
+func (s *Spectrum) fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+	s.done = true
+}
+
+// Ready reports whether there is enough decoded audio to draw from.
 func (s *Spectrum) Ready() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ready
+}
+
+// Done reports whether the whole track has been decoded.
+func (s *Spectrum) Done() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done
 }
 
 // Err reports a decode failure, if any.
