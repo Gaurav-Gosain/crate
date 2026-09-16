@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gaurav-Gosain/crate/internal/config"
 	"github.com/Gaurav-Gosain/crate/internal/library"
 	"github.com/Gaurav-Gosain/crate/internal/lyrics"
 	"github.com/Gaurav-Gosain/crate/internal/player"
@@ -273,16 +274,14 @@ func (a *App) handlePlayKey(c byte) bool {
 		if p != nil {
 			p.Seek(-5 * time.Second)
 		}
+	case 'a':
+		a.togglePane("art")
+	case 'v':
+		a.togglePane("vinyl")
+	case 's':
+		a.togglePane("spectrum")
 	case 'y':
-		a.mu.Lock()
-		a.showLyrics = !a.showLyrics
-		on := a.showLyrics
-		a.mu.Unlock()
-		if on {
-			a.logf("showing lyrics")
-		} else {
-			a.logf("showing the spectrum")
-		}
+		a.togglePane("lyrics")
 	case 't':
 		a.openThemes()
 	case ':', 11: // ':' or ctrl-k
@@ -290,6 +289,87 @@ func (a *App) handlePlayKey(c byte) bool {
 	}
 	a.redraw()
 	return false
+}
+
+// paneSet is which of play mode's optional panes are on. The library list
+// and the transport are not panes: play mode is unusable without them.
+type paneSet struct {
+	art, vinyl, spectrum, lyrics bool
+}
+
+func paneSetFrom(on map[string]bool) paneSet {
+	return paneSet{
+		art:      on["art"],
+		vinyl:    on["vinyl"],
+		spectrum: on["spectrum"],
+		lyrics:   on["lyrics"],
+	}
+}
+
+// isOn reports one pane by name, so the set can be walked in the canonical
+// order without repeating the field list everywhere.
+func (p paneSet) isOn(name string) bool {
+	switch name {
+	case "art":
+		return p.art
+	case "vinyl":
+		return p.vinyl
+	case "spectrum":
+		return p.spectrum
+	case "lyrics":
+		return p.lyrics
+	}
+	return false
+}
+
+// toggle flips one pane by name and reports its new state.
+func (p *paneSet) toggle(name string) bool {
+	switch name {
+	case "art":
+		p.art = !p.art
+		return p.art
+	case "vinyl":
+		p.vinyl = !p.vinyl
+		return p.vinyl
+	case "spectrum":
+		p.spectrum = !p.spectrum
+		return p.spectrum
+	case "lyrics":
+		p.lyrics = !p.lyrics
+		return p.lyrics
+	}
+	return false
+}
+
+// names lists the enabled panes in the canonical order. It is never nil:
+// in the config an absent list means every pane, so all-off has to save as
+// an empty list rather than disappear.
+func (p paneSet) names() []string {
+	out := []string{}
+	for _, n := range config.PaneNames {
+		if p.isOn(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// togglePane flips one pane on or off and remembers the choice in the
+// config, the same way a chosen theme is remembered.
+func (a *App) togglePane(name string) {
+	a.mu.Lock()
+	on := a.panes.toggle(name)
+	a.cfg.Play.Panes = a.panes.names()
+	a.mu.Unlock()
+	if err := a.cfg.Save(); err != nil {
+		a.logf("could not remember the panes: %v", err)
+	}
+	if on {
+		a.logf("showing the %s pane", name)
+	} else {
+		a.logf("hiding the %s pane", name)
+	}
+	a.redraw()
 }
 
 func (a *App) movePlayCursor(d, n int) {
@@ -309,11 +389,12 @@ func (a *App) movePlayCursor(d, n int) {
 
 // drawPlay renders the whole play view.
 //
-// The screen is three panels: the library on the left, the now playing panel
-// top right, and the spectrum under it. The now playing panel is sized to its
-// content, artwork plus a transport line, rather than to a fixed fraction of
-// the screen; sized by fraction it was mostly empty on a tall terminal, which
-// is exactly the void the panel used to read as.
+// The library sits on the left. The right column stacks the now playing
+// panel, then lyrics, then the spectrum on the bottom, each of the last two
+// only when its pane is on and the screen has room. The now playing panel is
+// sized to its content, artwork plus a transport line, rather than to a
+// fixed fraction of the screen; sized by fraction it was mostly empty on a
+// tall terminal, which is exactly the void the panel used to read as.
 func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	a.mu.Lock()
 	loading := a.playLoading
@@ -323,6 +404,8 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	sp := a.spectrum
 	now := a.nowPlaying
 	cover := a.cover
+	panes := a.panes
+	lyr, lyrNote := a.lyrics, a.lyricsNote
 	a.mu.Unlock()
 
 	top := 3
@@ -343,24 +426,30 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 		st = p.State()
 	}
 
-	lay := playLayout(w, top, contentH)
+	lay := playLayout(w, top, contentH, panes)
 
 	// Work out where the artwork sits before clearing, so those cells can be
-	// left alone. Everything else on screen is wiped and redrawn.
-	artBox := a.artRect(lay.now.inner())
-	clearExcept(b, w, top, contentH, artBox)
+	// left alone: writing over them erases the image inside the terminal.
+	// Everything else on screen is wiped and redrawn.
+	keep := rect{}
+	if cover != nil && lay.art.w > 0 {
+		keep = lay.art
+	} else if cover != nil {
+		// The cover is off screen this frame, so its cells are about to be
+		// cleared and the terminal will drop the picture. Forget the old
+		// placement, or showing it again at the same spot would send
+		// nothing and leave a blank rectangle.
+		cover.placed = rect{}
+	}
+	clearExcept(b, w, top, contentH, keep)
 
 	panel(b, lay.list, fmt.Sprintf("library · %d tracks", len(songs)), true)
 	panel(b, lay.now, "now playing", false)
-	a.mu.Lock()
-	showLyrics, lyr, lyrNote := a.showLyrics, a.lyrics, a.lyricsNote
-	a.mu.Unlock()
+	if lay.lyr.h > 0 {
+		panel(b, lay.lyr, "lyrics", false)
+	}
 	if lay.spec.h > 0 {
-		title := "spectrum"
-		if showLyrics {
-			title = "lyrics"
-		}
-		panel(b, lay.spec, title, false)
+		panel(b, lay.spec, "spectrum", false)
 	}
 
 	trackNo := 0
@@ -374,28 +463,32 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	}
 
 	a.drawPlayList(b, songs, cursor, now, lay.list.inner())
-	a.drawNowPanel(b, st, now, cover, lay.now.inner(), trackNo, len(songs))
+	a.drawNowPanel(b, st, now, cover, lay, trackNo, len(songs))
+	if lay.lyr.h > 0 {
+		a.drawLyrics(b, st, lyr, lyrNote, lay.lyr.inner())
+	}
 	if lay.spec.h > 0 {
-		if showLyrics {
-			a.drawLyrics(b, st, lyr, lyrNote, lay.spec.inner())
-		} else {
-			a.drawSpectrum(b, st, sp, lay.spec.inner())
-		}
+		a.drawSpectrum(b, st, sp, lay.spec.inner())
 	}
 }
 
-// playPanels is where the three panels of the play view land. spec has zero
-// height when the screen is too short to give the visualiser a useful one.
+// playPanels is where the panels of the play view land. lyr and spec have
+// zero height when their pane is off or the screen is too short for them;
+// art and vinyl are the squares inside the now panel, zero-width when absent.
 type playPanels struct {
-	list, now, spec rect
+	list, now  rect
+	lyr, spec  rect
+	art, vinyl rect
 }
 
-// playLayout works out the three panel rectangles.
+// playLayout works out every rectangle of the play view.
 //
-// It is a pure function of the screen size so the arithmetic can be asserted:
-// the panels have to tile the content area exactly, and the now playing panel
-// has to come out tall enough for its artwork and transport line.
-func playLayout(w, top, contentH int) playPanels {
+// It is a pure function of the screen size and the pane set so the
+// arithmetic can be asserted: nothing may overlap and nothing may leave the
+// screen at any size. The art and the record sit side by side in the now
+// playing panel because both are squares; lyrics and the spectrum stack
+// under it because both want the full width.
+func playLayout(w, top, contentH int, panes paneSet) playPanels {
 	// A column of margin either side, so the panels read as objects on the
 	// screen rather than as a grid welded to its edges.
 	const margin = 1
@@ -411,28 +504,129 @@ func playLayout(w, top, contentH int) playPanels {
 	list := rect{1 + margin, top, listW, contentH}
 	rightX := list.x + listW + 1
 	rightW := w - margin - rightX + 1
+	innerW := rightW - 2
 
-	// The artwork sets the panel height: rows for the art, one blank row, the
-	// transport, and the two border rows. The art gets what the screen can
-	// spare once the spectrum has a workable height.
-	artRows := clamp(contentH-13, 7, 16)
-	nowH := artRows + 4
-	if nowH > contentH {
+	// Room beside the squares for the track details: at least a gap of three
+	// and a dozen cells of text, growing with the panel so a pair of
+	// maximised squares cannot squeeze the title down to ellipses. Below the
+	// floor the details are noise, so a square gives way instead.
+	detailW := max(15, innerW/5)
+
+	showArt, showVinyl := panes.art, panes.vinyl
+	if showArt && showVinyl && (innerW-3-detailW)/4 < 7 {
+		// Two squares plus the details do not fit across. The record yields
+		// because the cover is the actual artefact and the record is decor.
+		showVinyl = false
+	}
+	// The width cap on a square: half the panel when it is alone, its share
+	// of the split when the art and the record are side by side.
+	sqCap := innerW / 4
+	if showArt && showVinyl {
+		sqCap = (innerW - 3 - detailW) / 4
+	}
+	if (showArt || showVinyl) && sqCap < 4 {
+		// Too narrow for even a small square to read as one.
+		showArt, showVinyl = false, false
+	}
+
+	// Wide panes need enough rows to be worth having; below that they are
+	// dropped rather than squeezed into strips of border. Lyrics yield
+	// before the spectrum: plenty of tracks have no synced lyrics at all,
+	// and a pane of apology is a poor use of a short screen.
+	const minWide = 6
+	minNow := 8 // details and the transport
+	if showArt || showVinyl {
+		minNow = 11 // a seven-row square plus blank row, transport and borders
+	}
+	showLyr, showSpec := panes.lyrics, panes.spectrum
+	if showLyr && showSpec && contentH < minNow+2*minWide {
+		showLyr = false
+	}
+	if showLyr && contentH < minNow+minWide {
+		showLyr = false
+	}
+	if showSpec && contentH < minNow+minWide {
+		showSpec = false
+	}
+	wide := 0
+	if showLyr {
+		wide++
+	}
+	if showSpec {
+		wide++
+	}
+
+	// The square rows: capped by height so the wide panes keep a fair
+	// share, and by width so the details keep theirs.
+	sq := 0
+	if showArt || showVinyl {
+		switch wide {
+		case 2:
+			sq = clamp((contentH-2*minWide)/2, 7, 16)
+		case 1:
+			sq = clamp((contentH-minWide)/2, 7, 16)
+		default:
+			// Nothing below: the art becomes the centrepiece.
+			sq = clamp(contentH-4, 7, 20)
+		}
+		sq = min(sq, sqCap)
+	}
+
+	// The now panel: the square, its blank row, the transport and the two
+	// borders. With nothing under it, it takes the whole column rather than
+	// leaving a band of dead screen below.
+	nowH := sq + 4
+	if !showArt && !showVinyl {
+		nowH = 8
+	}
+	if wide == 0 || nowH > contentH {
 		nowH = contentH
 	}
-	specH := contentH - nowH
-	if specH < 5 {
-		// Too short to split: the spectrum is dropped rather than squeezed
-		// into a strip of border with one row of bars inside it.
-		specH = 0
-		nowH = contentH
+	// A very short screen can leave the panel shorter than the square asked
+	// for; the square follows it down.
+	if sq > nowH-4 {
+		sq = nowH - 4
+	}
+	if sq < 4 {
+		sq, showArt, showVinyl = 0, false, false
 	}
 
-	return playPanels{
+	rem := contentH - nowH
+	lyrH, specH := 0, 0
+	switch {
+	case showLyr && showSpec:
+		// Lyrics take the odd row: an extra line to read beats an extra
+		// row of bars.
+		lyrH = (rem + 1) / 2
+		specH = rem - lyrH
+	case showLyr:
+		lyrH = rem
+	case showSpec:
+		specH = rem
+	}
+
+	lp := playPanels{
 		list: list,
 		now:  rect{rightX, top, rightW, nowH},
-		spec: rect{rightX, top + nowH, rightW, specH},
+		lyr:  rect{rightX, top + nowH, rightW, lyrH},
+		spec: rect{rightX, top + nowH + lyrH, rightW, specH},
 	}
+
+	// The squares, centred over the rows above the transport so the art and
+	// the details read as one composition.
+	if showArt || showVinyl {
+		inner := lp.now.inner()
+		sqY := inner.y + max(0, (inner.h-2-sq)/2)
+		x := inner.x + 1
+		if showArt {
+			lp.art = rect{x, sqY, 2 * sq, sq}
+			x += 2*sq + 2
+		}
+		if showVinyl {
+			lp.vinyl = rect{x, sqY, 2 * sq, sq}
+		}
+	}
+	return lp
 }
 
 // playRow is one line of the library pane: a song, an artist heading, or the
@@ -556,31 +750,6 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 	a.mu.Unlock()
 }
 
-// artRect returns the cells the artwork occupies inside the now playing panel.
-// The geometry lives here rather than inside the drawing so the clearing pass
-// can avoid exactly those cells.
-func (a *App) artRect(r rect) rect {
-	if r.h < 5 || r.w < 16 {
-		return rect{}
-	}
-	// Rows for the art, a blank row, and the transport line fill the panel
-	// exactly, so there is no dead band above or below.
-	artRows := r.h - 2
-	artCols := artRows * 2
-	if artCols > r.w/2 {
-		// A narrow panel caps the art by width instead. Kept even so the
-		// halved value stays square.
-		artCols = r.w / 2
-		artCols -= artCols % 2
-		artRows = artCols / 2
-	}
-	if artRows < 2 || artCols < 4 {
-		return rect{}
-	}
-	artY := r.y + max(0, (r.h-2-artRows)/2)
-	return rect{r.x + 1, artY, artCols, artRows}
-}
-
 // clearExcept blanks the content area a row at a time, skipping any cells
 // inside keep. Writing spaces over a cell erases it just as a screen clear
 // would, so the artwork has to be stepped around rather than painted over.
@@ -602,39 +771,55 @@ func clearExcept(b *strings.Builder, w, top, h int, keep rect) {
 	}
 }
 
-// drawNowPanel draws the cover, the track details and the transport.
-func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song, cover *art, r rect, trackNo, total int) {
-	if r.h < 5 || r.w < 16 {
+// drawNowPanel draws the squares, the track details and the transport.
+func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song, cover *art, lay playPanels, trackNo, total int) {
+	r := lay.now.inner()
+	if r.h < 3 || r.w < 16 {
 		return
 	}
 
-	ar := a.artRect(r)
-	if ar.w == 0 {
-		return
+	// The record turns with the clock while playing and freezes where the
+	// track paused, so a stopped record looks stopped.
+	rot := float64(time.Now().UnixMilli()%2600) / 2600 * 2 * math.Pi
+	if !st.Playing {
+		rot = float64(st.Position.Milliseconds()%2600) / 2600 * 2 * math.Pi
 	}
 
-	if cover != nil {
-		// The placement rides in the frame at the cursor, so position first.
-		// displayCmd remembers where it last placed the image and sends
-		// nothing when the rectangle has not moved.
-		moveTo(b, ar.y, ar.x)
-		b.WriteString(cover.displayCmd(ar))
-	} else {
-		// No cover, or a terminal that cannot show one: spin a record instead.
-		rot := float64(time.Now().UnixMilli()%2600) / 2600 * 2 * math.Pi
-		if !st.Playing {
-			rot = float64(st.Position.Milliseconds()%2600) / 2600 * 2 * math.Pi
-		}
-		for i, line := range vinyl(ar.w, ar.h, rot, theme.Current()) {
-			moveTo(b, ar.y+i, ar.x)
-			b.WriteString(line)
+	if ar := lay.art; ar.w > 0 {
+		switch {
+		case cover != nil:
+			// The placement rides in the frame at the cursor, so position
+			// first. displayCmd remembers where it last placed the image and
+			// sends nothing when the rectangle has not moved.
+			moveTo(b, ar.y, ar.x)
+			b.WriteString(cover.displayCmd(ar))
+		case lay.vinyl.w == 0:
+			// No cover and the record pane is off: the record fills in, so
+			// the slot never sits empty.
+			drawVinylAt(b, ar, rot)
+		default:
+			// No cover, but a record already spins next door. A second one
+			// would read as two turntables; an empty sleeve says plainly
+			// that this track has no artwork.
+			drawCoverPlaceholder(b, ar)
 		}
 	}
+	if lay.vinyl.w > 0 {
+		drawVinylAt(b, lay.vinyl, rot)
+	}
 
-	// The details, as a block beside the art: title, artist, album, then a
-	// quiet line placing the track in the library. The block is centred on
-	// the art so the two read as one composition.
-	tx := ar.x + ar.w + 3
+	// The details, as a block beside the squares: title, artist, album, then
+	// a quiet line placing the track in the library. The block is centred on
+	// the squares so they read as one composition; with no squares it is
+	// centred in the panel instead.
+	square := lay.art
+	if lay.vinyl.w > 0 {
+		square = lay.vinyl
+	}
+	tx := r.x + 2
+	if square.w > 0 {
+		tx = square.x + square.w + 3
+	}
 	tw := r.x + r.w - tx - 1
 	if tw >= 12 {
 		type line struct{ style, text string }
@@ -669,7 +854,10 @@ func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song
 				lines = append(lines, line{"", ""}, line{muted, truncate(meta, tw)})
 			}
 		}
-		ty := ar.y + max(0, (ar.h-len(lines))/2)
+		ty := r.y + max(0, (r.h-1-len(lines))/2)
+		if square.w > 0 {
+			ty = square.y + max(0, (square.h-len(lines))/2)
+		}
 		for i, ln := range lines {
 			if ty+i > r.y+r.h-3 {
 				break
@@ -683,6 +871,43 @@ func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song
 	}
 
 	a.drawTransport(b, st, rect{r.x + 1, r.y + r.h - 1, r.w - 2, 1})
+}
+
+// drawVinylAt spins the record inside a rectangle.
+func drawVinylAt(b *strings.Builder, r rect, rot float64) {
+	for i, line := range vinyl(r.w, r.h, rot, theme.Current()) {
+		moveTo(b, r.y+i, r.x)
+		b.WriteString(line)
+	}
+}
+
+// drawCoverPlaceholder fills the art square when the track has no cover but
+// the record pane is spinning beside it. Every cell is written: the clearing
+// pass may have stepped around this rectangle for a cover that has since
+// gone, so anything not painted here could be a stale leftover.
+func drawCoverPlaceholder(b *strings.Builder, r rect) {
+	if r.w < 4 || r.h < 2 {
+		return
+	}
+	label := truncate("no cover", r.w-4)
+	for y := 0; y < r.h; y++ {
+		moveTo(b, r.y+y, r.x)
+		switch {
+		case y == 0:
+			fmt.Fprintf(b, "%s╭%s╮%s", rule, strings.Repeat("┄", r.w-2), reset)
+		case y == r.h-1:
+			fmt.Fprintf(b, "%s╰%s╯%s", rule, strings.Repeat("┄", r.w-2), reset)
+		case y == r.h/2:
+			pad := r.w - 2 - visibleWidth(label)
+			left := pad / 2
+			fmt.Fprintf(b, "%s│%s%s%s%s%s%s│%s",
+				rule, strings.Repeat(" ", left),
+				muted, label, reset,
+				strings.Repeat(" ", pad-left), rule, reset)
+		default:
+			fmt.Fprintf(b, "%s│%s│%s", rule, strings.Repeat(" ", r.w-2), reset)
+		}
+	}
 }
 
 // drawTransport draws the play state, elapsed time, position bar and time

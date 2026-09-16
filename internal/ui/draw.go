@@ -339,7 +339,7 @@ func (a *App) drawFooter(b *strings.Builder, w, h int, prompt, buf string) {
 	if inPlay {
 		keys = [][2]string{
 			{"space", "pause"}, {"enter", "play"}, {"n/b", "next/prev"},
-			{"h/l", "seek"}, {"y", "lyrics"}, {":", "commands"}, {"q", "back"},
+			{"h/l", "seek"}, {"a/v/s/y", "panes"}, {":", "commands"}, {"q", "back"},
 		}
 	}
 	var parts []string

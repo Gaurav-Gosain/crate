@@ -108,13 +108,15 @@ type App struct {
 	cover        *art
 	coverFor     string
 
-	// Lyrics for the playing track, and whether the panel is showing them
-	// instead of the analyser. They share the space because a person watches
-	// one or the other, never both.
+	// Lyrics for the playing track.
 	lyrics     *lyrics.Lyrics
 	lyricsFor  string
 	lyricsNote string
-	showLyrics bool
+
+	// panes is which of play mode's optional panes are on screen. It starts
+	// from the config and is edited live by the toggles, which write the
+	// change back so it survives a restart.
+	panes paneSet
 
 	// Regions the mouse can act on, recorded as the frame is drawn. Working
 	// them out again on a click would mean duplicating the layout arithmetic
@@ -156,6 +158,15 @@ func New(cfg *config.Config) *App {
 		cfg:      cfg,
 		redrawCh: make(chan struct{}, 1),
 		quit:     make(chan struct{}),
+	}
+	// A bad pane name is reported the same way a bad theme is: out loud, on
+	// both stderr and the activity log, with the recognised panes kept. A
+	// typo must not silently blank part of the play view.
+	on, perr := cfg.Play.Enabled()
+	a.panes = paneSetFrom(on)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "crate: %v\n", perr)
+		a.logf("%v", perr)
 	}
 	for _, s := range cfg.Sources {
 		a.rows = append(a.rows, row{src: s, state: idle})

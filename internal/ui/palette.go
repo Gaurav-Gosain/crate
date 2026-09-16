@@ -35,11 +35,10 @@ func (a *App) openPalette() {
 			}},
 			{label: "next track", detail: "n", run: func() { go a.playStep(1) }},
 			{label: "previous track", detail: "b", run: func() { go a.playStep(-1) }},
-			{label: "show lyrics or the spectrum", detail: "y", run: func() {
-				a.mu.Lock()
-				a.showLyrics = !a.showLyrics
-				a.mu.Unlock()
-			}},
+			{label: "toggle the album art pane", detail: "a", run: func() { a.togglePane("art") }},
+			{label: "toggle the vinyl pane", detail: "v", run: func() { a.togglePane("vinyl") }},
+			{label: "toggle the spectrum pane", detail: "s", run: func() { a.togglePane("spectrum") }},
+			{label: "toggle the lyrics pane", detail: "y", run: func() { a.togglePane("lyrics") }},
 			{label: "leave play mode", detail: "q", run: a.leavePlay},
 		}, items...)
 	} else {

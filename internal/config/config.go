@@ -83,6 +83,8 @@ type Config struct {
 	Remote    Remote `json:"remote"`
 	// Theme names the palette the interface draws with.
 	Theme string `json:"theme,omitempty"`
+	// Play holds play mode's preferences: which panes the view draws.
+	Play Play `json:"play,omitzero"`
 	// Stream is where play mode fetches audio from when the library is not
 	// kept locally. The remote is the only copy in that mode, so there is
 	// nothing on disk to play.
@@ -93,6 +95,54 @@ type Config struct {
 	// through the shared state: another device still listing the source
 	// would simply put it back, and the deleted music would return with it.
 	Removed map[string]string `json:"removed,omitempty"`
+}
+
+// PaneNames are the play-mode panes that exist, in the order the layout
+// draws them. The ui package owns the drawing; the names live here so a
+// config can be checked without loading the interface.
+var PaneNames = []string{"art", "vinyl", "spectrum", "lyrics"}
+
+// Play is the play-mode section of the config.
+type Play struct {
+	// Panes lists which panes the play view draws. Absent means all of
+	// them; an empty list means none of them.
+	Panes []string `json:"panes"`
+}
+
+// Enabled reports which panes play mode should draw.
+//
+// Unknown names come back as an error rather than being skipped, because a
+// typo that quietly hides a pane looks exactly like a broken layout. The
+// valid panes are still returned alongside the error, so a caller can report
+// the mistake and carry on with what the user plainly meant.
+func (p Play) Enabled() (map[string]bool, error) {
+	on := make(map[string]bool, len(PaneNames))
+	if p.Panes == nil {
+		for _, n := range PaneNames {
+			on[n] = true
+		}
+		return on, nil
+	}
+	var bad []string
+	for _, n := range p.Panes {
+		known := false
+		for _, k := range PaneNames {
+			if n == k {
+				known = true
+				break
+			}
+		}
+		if !known {
+			bad = append(bad, n)
+			continue
+		}
+		on[n] = true
+	}
+	if len(bad) > 0 {
+		return on, fmt.Errorf("play.panes: unknown pane %q (the panes are %s)",
+			strings.Join(bad, ", "), strings.Join(PaneNames, ", "))
+	}
+	return on, nil
 }
 
 // MarkRemoved records a tombstone for a source.
