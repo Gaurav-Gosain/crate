@@ -325,6 +325,10 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 		"--parse-metadata", ":(?P<meta_synopsis>)",
 		"--parse-metadata", ":(?P<meta_comment>)",
 		"--parse-metadata", ":(?P<meta_purl>)",
+		// Keep the video id in the file. It is the only way to find the
+		// captions for this exact upload later, and without it a track is
+		// just a title, which is what made matching lyrics guesswork.
+		"--parse-metadata", "%(id)s:(?P<meta_youtube_id>.+)",
 		// Album artist drives grouping. Take the first credited name rather
 		// than the whole comma joined list, so a record lands under one
 		// artist instead of inventing one per combination of collaborators.

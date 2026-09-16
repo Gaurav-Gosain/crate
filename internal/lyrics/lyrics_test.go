@@ -209,3 +209,30 @@ func TestPickPrefersTheClosestEditWithinABand(t *testing.T) {
 		t.Fatalf("picked the %v second edit over the exact one", got.Duration)
 	}
 }
+
+// What goes into the tag has to come back out the same, or a set nudged into
+// place drifts again the moment it is read from the file.
+func TestLRCRoundTrips(t *testing.T) {
+	in := "[00:01.50]placeholder one\n[01:05.25]placeholder two\n[02:00.00]placeholder three\n"
+	l := &Lyrics{Lines: Parse(in)}
+	back := Parse(l.LRC())
+	if len(back) != len(l.Lines) {
+		t.Fatalf("got %d lines back from %d", len(back), len(l.Lines))
+	}
+	for i := range back {
+		if back[i].At != l.Lines[i].At || back[i].Text != l.Lines[i].Text {
+			t.Fatalf("line %d changed: %v %q -> %v %q",
+				i, l.Lines[i].At, l.Lines[i].Text, back[i].At, back[i].Text)
+		}
+	}
+}
+
+// A nudge is part of the words once they are written into a file: nothing
+// downstream knows about crate's offset file.
+func TestLRCBakesInTheOffset(t *testing.T) {
+	l := &Lyrics{Lines: Parse("[00:10.00]placeholder"), Offset: 2 * time.Second}
+	back := Parse(l.LRC())
+	if back[0].At != 12*time.Second {
+		t.Fatalf("got %v, want the offset applied", back[0].At)
+	}
+}

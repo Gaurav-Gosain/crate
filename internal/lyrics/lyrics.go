@@ -88,6 +88,25 @@ func Parse(lrc string) []Line {
 	return out
 }
 
+// LRC renders the lines back to the format a music server expects in a tag.
+// The offset is baked in, so a set nudged into place stays in place wherever
+// it is read.
+func (l *Lyrics) LRC() string {
+	if l == nil || len(l.Lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, ln := range l.Lines {
+		at := ln.At + l.Offset
+		if at < 0 {
+			at = 0
+		}
+		cs := int(at.Milliseconds() / 10)
+		fmt.Fprintf(&b, "[%02d:%02d.%02d]%s\n", cs/6000, (cs/100)%60, cs%100, ln.Text)
+	}
+	return b.String()
+}
+
 // At returns the index of the line playing at pos, or -1 before the first.
 func (l *Lyrics) At(pos time.Duration) int {
 	if l == nil || len(l.Lines) == 0 {

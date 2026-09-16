@@ -194,6 +194,18 @@ func (a *App) playSelected() {
 		lctx, lcancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer lcancel()
 		got, err := lyrics.Fetch(lctx, song.Artist, song.Title, dur)
+		if err != nil {
+			// Nothing catalogued. The video the track came from usually has
+			// captions, and those are timed against this exact upload rather
+			// than against a release that may be a different edit, so they
+			// cannot drift. They are a machine's transcription of singing, so
+			// the words are less reliable, which is why they come second.
+			if id := lyrics.VideoID(lctx, src); id != "" {
+				if cap, cerr := lyrics.FromVideo(lctx, id); cerr == nil {
+					got, err = cap, nil
+				}
+			}
+		}
 
 		a.mu.Lock()
 		defer a.mu.Unlock()
