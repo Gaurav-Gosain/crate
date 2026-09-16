@@ -341,17 +341,17 @@ func playLayout(w, top, contentH int) playPanels {
 	// screen rather than as a grid welded to its edges.
 	const margin = 1
 
-	listW := clamp(w/3, 26, 50)
-	if listW > w-44 {
-		listW = max(24, w-44)
+	// The list gives way on a narrow screen: the right column has the
+	// artwork and the transport, which stop working below about 24 columns,
+	// where a narrower list merely shows shorter titles.
+	listW := clamp(w/3, 24, 50)
+	if maxList := w - 2*margin - 1 - 24; listW > maxList {
+		listW = max(16, maxList)
 	}
 
 	list := rect{1 + margin, top, listW, contentH}
 	rightX := list.x + listW + 1
 	rightW := w - margin - rightX + 1
-	if rightW < 20 {
-		rightW = 20
-	}
 
 	// The artwork sets the panel height: rows for the art, one blank row, the
 	// transport, and the two border rows. The art gets what the screen can
@@ -487,7 +487,7 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 		case playing:
 			fmt.Fprintf(b, " %s%s%s%s", accent, mark, label, reset)
 		default:
-			fmt.Fprintf(b, " %s%s%s%s%s", mark, fg, label, reset, "")
+			fmt.Fprintf(b, " %s%s%s%s", mark, fg, label, reset)
 		}
 	}
 
@@ -670,7 +670,7 @@ func (a *App) drawTransport(b *strings.Builder, st player.State, r rect) {
 // drawSpectrum draws the visualiser, inset from the panel border so the bars
 // have air around them, with a baseline for the bars to stand on.
 func (a *App) drawSpectrum(b *strings.Builder, st player.State, sp *player.Spectrum, r rect) {
-	if r.h < 3 || r.w < 12 || sp == nil {
+	if r.h < 3 || r.w < 12 {
 		return
 	}
 	x0, w0 := r.x+2, r.w-4
@@ -683,13 +683,16 @@ func (a *App) drawSpectrum(b *strings.Builder, st player.State, sp *player.Spect
 	used := n*3 - 1
 	off := (w0 - used) / 2
 
-	vals, peaks := sp.BarsWithPeaks(st.Position, n)
-	for i, line := range spectrumBars(vals, peaks, h0-1, theme.Current()) {
-		moveTo(b, y0+i, x0+off)
-		b.WriteString(line)
+	if sp != nil {
+		vals, peaks := sp.BarsWithPeaks(st.Position, n)
+		for i, line := range spectrumBars(vals, peaks, h0-1, theme.Current()) {
+			moveTo(b, y0+i, x0+off)
+			b.WriteString(line)
+		}
 	}
 	// The baseline gives the bars a floor to stand on; without it they hang
-	// against the border below them.
+	// against the border below them. It is drawn even before anything plays,
+	// so the panel reads as an instrument at rest rather than an empty box.
 	moveTo(b, y0+h0-1, x0+off)
 	fmt.Fprintf(b, "%s%s%s", rule, strings.Repeat("▔", used), reset)
 }
