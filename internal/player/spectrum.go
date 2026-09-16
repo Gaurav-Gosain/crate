@@ -275,7 +275,6 @@ func (s *Spectrum) normalise() []float64 {
 		out[i] = x
 	}
 	return out
-	return append([]float64(nil), s.smoothed...)
 }
 
 // hann builds a Hann window, which stops the abrupt ends of each slice from
