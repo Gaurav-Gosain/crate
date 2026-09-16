@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gaurav-Gosain/crate/internal/library"
+	"github.com/Gaurav-Gosain/crate/internal/lyrics"
 	"github.com/Gaurav-Gosain/crate/internal/player"
 	"github.com/Gaurav-Gosain/crate/internal/theme"
 )
@@ -65,6 +66,7 @@ func (a *App) leavePlay() {
 	a.player = nil
 	a.spectrum = nil
 	a.cover, a.coverFor = nil, ""
+	a.lyrics, a.lyricsFor, a.lyricsNote = nil, "", ""
 	a.mode = modeList
 	a.mu.Unlock()
 	if cover != nil {
@@ -147,6 +149,42 @@ func (a *App) playSelected() {
 		a.write(old.deleteCmd())
 		old.cleanup()
 	}
+
+	// Lyrics are looked up in the background: the track is already playing and
+	// should not wait on a web request that may find nothing.
+	go func() {
+		a.mu.Lock()
+		a.lyrics, a.lyricsFor, a.lyricsNote = nil, song.Rel, "looking for lyrics..."
+		a.mu.Unlock()
+
+		// Wait for the track length before searching. Duration is the
+		// strongest evidence that a result is the same recording rather than
+		// a cover or a remix, and mpv only knows it a moment after the file
+		// opens. Searching without it matched a different artist's version.
+		var dur time.Duration
+		for i := 0; i < 30; i++ {
+			if d := p.State().Duration; d > 0 {
+				dur = d
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		lctx, lcancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer lcancel()
+		got, err := lyrics.Fetch(lctx, song.Artist, song.Title, dur)
+
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.lyricsFor != song.Rel {
+			return // the track moved on while this was in flight
+		}
+		if err != nil {
+			a.lyrics, a.lyricsNote = nil, "no synced lyrics for this track"
+			return
+		}
+		a.lyrics, a.lyricsNote = got, ""
+	}()
 
 	if !graphicsSupported() {
 		return
@@ -235,6 +273,16 @@ func (a *App) handlePlayKey(c byte) bool {
 		if p != nil {
 			p.Seek(-5 * time.Second)
 		}
+	case 'y':
+		a.mu.Lock()
+		a.showLyrics = !a.showLyrics
+		on := a.showLyrics
+		a.mu.Unlock()
+		if on {
+			a.logf("showing lyrics")
+		} else {
+			a.logf("showing the spectrum")
+		}
 	case 't':
 		a.openThemes()
 	case ':', 11: // ':' or ctrl-k
@@ -304,8 +352,15 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 
 	panel(b, lay.list, fmt.Sprintf("library · %d tracks", len(songs)), true)
 	panel(b, lay.now, "now playing", false)
+	a.mu.Lock()
+	showLyrics, lyr, lyrNote := a.showLyrics, a.lyrics, a.lyricsNote
+	a.mu.Unlock()
 	if lay.spec.h > 0 {
-		panel(b, lay.spec, "spectrum", false)
+		title := "spectrum"
+		if showLyrics {
+			title = "lyrics"
+		}
+		panel(b, lay.spec, title, false)
 	}
 
 	trackNo := 0
@@ -321,7 +376,11 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	a.drawPlayList(b, songs, cursor, now, lay.list.inner())
 	a.drawNowPanel(b, st, now, cover, lay.now.inner(), trackNo, len(songs))
 	if lay.spec.h > 0 {
-		a.drawSpectrum(b, st, sp, lay.spec.inner())
+		if showLyrics {
+			a.drawLyrics(b, st, lyr, lyrNote, lay.spec.inner())
+		} else {
+			a.drawSpectrum(b, st, sp, lay.spec.inner())
+		}
 	}
 }
 
@@ -665,6 +724,56 @@ func (a *App) drawTransport(b *strings.Builder, st player.State, r rect) {
 	a.mu.Lock()
 	a.hitProgress = rect{barX, r.y, barW, 1}
 	a.mu.Unlock()
+}
+
+// drawLyrics shows the words for the moment being played, the line in hand
+// bright and its neighbours dimmed.
+//
+// The window follows the track rather than scrolling steadily, so the current
+// line stays in the same place and the eye does not have to chase it. Nothing
+// is guessed: where the service has no timed words for a recording, that is
+// said plainly rather than showing untimed ones, which would be confidently
+// wrong about every line.
+func (a *App) drawLyrics(b *strings.Builder, st player.State, l *lyrics.Lyrics, note string, r rect) {
+	if r.h < 2 || r.w < 12 {
+		return
+	}
+	if l == nil || len(l.Lines) == 0 {
+		msg := note
+		if msg == "" {
+			msg = "looking for lyrics..."
+		}
+		moveTo(b, r.y+r.h/2, r.x+max(0, (r.w-visibleWidth(msg))/2))
+		fmt.Fprintf(b, "%s%s%s", muted, msg, reset)
+		return
+	}
+
+	cur := l.At(st.Position)
+	// Hold the current line a third of the way down: enough of what is coming
+	// to read ahead, enough of what has gone to keep your place.
+	first := cur - r.h/3
+	t := theme.Current()
+
+	for i := 0; i < r.h; i++ {
+		idx := first + i
+		if idx < 0 || idx >= len(l.Lines) {
+			continue
+		}
+		text := l.Lines[idx].Text
+		if text == "" {
+			continue
+		}
+		line := truncate(text, r.w-2)
+		moveTo(b, r.y+i, r.x+max(0, (r.w-visibleWidth(line))/2))
+		switch {
+		case idx == cur:
+			fmt.Fprintf(b, "%s%s%s%s", bold, theme.Fg(t.Accent), line, reset)
+		case idx == cur-1 || idx == cur+1:
+			fmt.Fprintf(b, "%s%s%s", fg, line, reset)
+		default:
+			fmt.Fprintf(b, "%s%s%s", muted, line, reset)
+		}
+	}
 }
 
 // drawSpectrum draws the visualiser, inset from the panel border so the bars

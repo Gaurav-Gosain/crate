@@ -218,6 +218,16 @@ func pick(cands []candidate, artist, title string, dur time.Duration) *candidate
 				s -= 30
 			}
 		}
+		// Evidence that this is the same recording at all: either the artist
+		// is named, or the length is within a few seconds. A result with
+		// neither is some other performance that happens to share a title,
+		// and these titles are common. Showing the wrong words in time with
+		// the music is worse than showing none, because it looks right.
+		artistNamed := wantArtist != "" && (strings.Contains(wantArtist, ca) || strings.Contains(ca, wantArtist))
+		lengthClose := dur > 0 && c.Duration > 0 && abs(c.Duration-dur.Seconds()) <= 3
+		if !artistNamed && !lengthClose {
+			continue
+		}
 		all = append(all, scored{c, s})
 	}
 	if len(all) == 0 {
@@ -225,6 +235,13 @@ func pick(cands []candidate, artist, title string, dur time.Duration) *candidate
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].s > all[j].s })
 	return all[0].c
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }
 
 func fold(s string) string {

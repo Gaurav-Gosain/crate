@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 	"github.com/Gaurav-Gosain/crate/internal/library"
+	"github.com/Gaurav-Gosain/crate/internal/lyrics"
 	"github.com/Gaurav-Gosain/crate/internal/player"
 	"github.com/Gaurav-Gosain/crate/internal/theme"
 	"golang.org/x/term"
@@ -106,6 +107,14 @@ type App struct {
 	spectrumStop context.CancelFunc
 	cover        *art
 	coverFor     string
+
+	// Lyrics for the playing track, and whether the panel is showing them
+	// instead of the analyser. They share the space because a person watches
+	// one or the other, never both.
+	lyrics     *lyrics.Lyrics
+	lyricsFor  string
+	lyricsNote string
+	showLyrics bool
 
 	// Regions the mouse can act on, recorded as the frame is drawn. Working
 	// them out again on a click would mean duplicating the layout arithmetic

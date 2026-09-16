@@ -137,3 +137,36 @@ func TestPickMatchesAnArtistBuriedInAList(t *testing.T) {
 		t.Fatalf("picked %+v", got)
 	}
 }
+
+// These titles are common, and a result that names a different artist and
+// runs to a different length is some other performance. Showing its words in
+// time with the music is worse than showing none, because it looks right.
+func TestPickRejectsAnUnrelatedPerformance(t *testing.T) {
+	cands := []candidate{
+		{TrackName: "Heer", ArtistName: "Somebody Else", Duration: 300, SyncedLyrics: "[00:01.00]a"},
+	}
+	if got := pick(cands, "Diljit Dosanjh", "Heer", 254*time.Second); got != nil {
+		t.Fatalf("picked an unrelated recording: %+v", got)
+	}
+}
+
+// A different artist is acceptable when the length matches closely: these
+// files credit whoever the uploader felt like crediting.
+func TestPickAllowsADifferentArtistWhenTheLengthMatches(t *testing.T) {
+	cands := []candidate{
+		{TrackName: "Heer", ArtistName: "Somebody Else", Duration: 255, SyncedLyrics: "[00:01.00]a"},
+	}
+	if got := pick(cands, "Diljit Dosanjh", "Heer", 254*time.Second); got == nil {
+		t.Fatal("a close length is evidence enough")
+	}
+}
+
+// And the named artist is enough even when no length is known.
+func TestPickAllowsTheNamedArtistWithoutADuration(t *testing.T) {
+	cands := []candidate{
+		{TrackName: "Song", ArtistName: "Karan Aujla", Duration: 0, SyncedLyrics: "[00:01.00]a"},
+	}
+	if got := pick(cands, "Avvy Sra, Karan Aujla", "Song", 0); got == nil {
+		t.Fatal("the artist being named is evidence enough")
+	}
+}
