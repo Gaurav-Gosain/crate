@@ -1,6 +1,9 @@
 package ui
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // Mouse reporting is enabled in SGR mode. The older X10 encoding packs the
 // coordinates into single bytes and simply cannot address a column past 223,
@@ -188,6 +191,25 @@ func skipAPC(buf []byte) (n int, partial bool) {
 		}
 	}
 	return 0, true
+}
+
+// graphicsError extracts the message from a kitty graphics reply, if it is
+// reporting a problem. A reply reads "\x1b_Gi=7101;EBADF:..." on failure and
+// "...;OK" on success.
+func graphicsError(apc []byte) string {
+	s := string(apc)
+	if !strings.HasPrefix(s, "\x1b_G") {
+		return ""
+	}
+	i := strings.IndexByte(s, ';')
+	if i < 0 {
+		return ""
+	}
+	msg := strings.TrimSuffix(s[i+1:], "\x1b\\")
+	if msg == "" || msg == "OK" {
+		return ""
+	}
+	return msg
 }
 
 // itoa keeps the escape building free of fmt in the hot path.

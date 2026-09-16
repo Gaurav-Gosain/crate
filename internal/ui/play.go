@@ -170,6 +170,9 @@ func (a *App) playSelected() {
 			art.cleanup()
 			return
 		}
+		// Send the pixels on their own, outside any frame, then let the
+		// frames place the stored image. The data only needs to cross once.
+		a.tty.WriteString(art.transmitCmd())
 		a.redraw()
 	}()
 }
@@ -202,21 +205,33 @@ func (a *App) handlePlayKey(c byte) bool {
 		if p != nil {
 			p.Toggle()
 		}
-	case 'j', 14:
+	case 'j', 14, keyDown:
 		a.movePlayCursor(1, n)
-	case 'k', 16:
+	case 'k', 16, keyUp:
 		a.movePlayCursor(-1, n)
+	case keyPgDn:
+		a.movePlayCursor(10, n)
+	case keyPgUp:
+		a.movePlayCursor(-10, n)
+	case keyHome:
+		a.mu.Lock()
+		a.playCursor = 0
+		a.mu.Unlock()
+	case keyEnd:
+		a.mu.Lock()
+		a.playCursor = max(0, len(a.songs)-1)
+		a.mu.Unlock()
 	case '\r', '\n':
 		go a.playSelected()
 	case 'n':
 		go a.playStep(1)
 	case 'b':
 		go a.playStep(-1)
-	case 'l':
+	case 'l', keyRight:
 		if p != nil {
 			p.Seek(5 * time.Second)
 		}
-	case 'h':
+	case 'h', keyLeft:
 		if p != nil {
 			p.Seek(-5 * time.Second)
 		}

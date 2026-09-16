@@ -3,6 +3,7 @@ package player
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 // A pure tone must show up in the bin matching its frequency. If the transform
@@ -81,4 +82,49 @@ func TestBarsAreNotAllSaturated(t *testing.T) {
 	if high == len(bars) {
 		t.Fatal("every bar is at full height; the transform is not normalised")
 	}
+}
+
+// A quiet track must still fill the display. Without automatic gain the bars
+// are scaled by absolute level, so a quietly mastered record draws a row of
+// stubs however lively the music is.
+func TestQuietAudioStillUsesTheHeight(t *testing.T) {
+	loud := barsFor(t, 0.6)
+	quiet := barsFor(t, 0.05)
+	if loud < 0.7 {
+		t.Fatalf("loud audio peaked at %.2f, expected most of the height", loud)
+	}
+	if quiet < 0.5 {
+		t.Fatalf("quiet audio peaked at only %.2f; the gain is not adapting", quiet)
+	}
+}
+
+// Silence must not be amplified into a full display.
+func TestSilenceStaysFlat(t *testing.T) {
+	if got := barsFor(t, 0); got > 0.2 {
+		t.Fatalf("silence drew bars %.2f tall", got)
+	}
+}
+
+// barsFor runs a tone at the given amplitude through enough frames for the
+// gain to settle, and reports the tallest bar.
+func barsFor(t *testing.T, amp float64) float64 {
+	t.Helper()
+	s := &Spectrum{window: hann(fftSize), ready: true}
+	// Long enough that the frames below stay inside the audio: running past
+	// the end returns decaying values and the measurement reads as silence.
+	s.samples = make([]float64, sampleRate*5)
+	for i := range s.samples {
+		s.samples[i] = amp * math.Sin(2*math.Pi*440*float64(i)/sampleRate)
+	}
+	var out []float64
+	for i := 0; i < 80; i++ {
+		out = s.Bars(time.Duration(i)*40*time.Millisecond, 24)
+	}
+	peak := 0.0
+	for _, v := range out {
+		if v > peak {
+			peak = v
+		}
+	}
+	return peak
 }

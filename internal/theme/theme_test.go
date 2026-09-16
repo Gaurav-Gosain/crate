@@ -56,3 +56,57 @@ func TestUnparseableColourDoesNotProduceNegatives(t *testing.T) {
 		t.Fatalf("got %d,%d,%d", r, g, b)
 	}
 }
+
+// The converted palettes must be available, and the hand tuned ones must win
+// where the names collide: a mechanical mapping of a terminal palette does not
+// always pick the colour a person would have.
+func TestConvertedThemesAreAvailable(t *testing.T) {
+	if len(Names()) < 300 {
+		t.Fatalf("only %d themes; the converted set is not wired in", len(Names()))
+	}
+	for _, want := range []string{"dracula", "nord", "gruvbox", "catppuccin"} {
+		if _, ok := Get(want); !ok {
+			t.Fatalf("%s is missing", want)
+		}
+	}
+}
+
+func TestCuratedThemesTakePrecedence(t *testing.T) {
+	got, ok := Get("dracula")
+	if !ok {
+		t.Fatal("dracula is missing")
+	}
+	if got.Accent != builtin[0].Accent {
+		t.Fatalf("dracula accent is %s, want the curated %s", got.Accent, builtin[0].Accent)
+	}
+}
+
+func TestEveryThemeIsUsable(t *testing.T) {
+	for _, name := range Names() {
+		th, ok := Get(name)
+		if !ok {
+			t.Fatalf("%s listed but not resolvable", name)
+		}
+		for label, c := range map[string]string{
+			"accent": th.Accent, "ok": th.Ok, "warn": th.Warn,
+			"bad": th.Bad, "muted": th.Muted, "rule": th.Rule, "fg": th.Fg,
+		} {
+			if len(c) != 7 || c[0] != '#' {
+				t.Fatalf("theme %s has a bad %s colour: %q", name, label, c)
+			}
+		}
+		if len(th.Spectrum) < 2 {
+			t.Fatalf("theme %s has %d spectrum colours", name, len(th.Spectrum))
+		}
+	}
+}
+
+func TestNamesAreUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, n := range Names() {
+		if seen[n] {
+			t.Fatalf("duplicate theme name %q", n)
+		}
+		seen[n] = true
+	}
+}

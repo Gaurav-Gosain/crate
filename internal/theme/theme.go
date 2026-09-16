@@ -75,12 +75,42 @@ var builtin = []Theme{
 var (
 	mu      sync.RWMutex
 	current = builtin[0]
+
+	allOnce  sync.Once
+	allCache []Theme
 )
+
+// all returns every theme: the hand tuned ones first, then the converted
+// palettes, skipping any whose name is already taken.
+//
+// The curated entries win because they were picked by eye. The converted set
+// maps a terminal palette onto these roles mechanically, and the slot a
+// terminal calls "bright purple" is not always the colour a person would
+// choose to draw attention with: dracula's is pink.
+func all() []Theme {
+	allOnce.Do(func() {
+		seen := make(map[string]bool, len(builtin)+len(generated))
+		allCache = make([]Theme, 0, len(builtin)+len(generated))
+		for _, t := range builtin {
+			seen[t.Name] = true
+			allCache = append(allCache, t)
+		}
+		for _, t := range generated {
+			if seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			allCache = append(allCache, t)
+		}
+	})
+	return allCache
+}
 
 // Names lists the available themes, sorted.
 func Names() []string {
-	out := make([]string, 0, len(builtin))
-	for _, t := range builtin {
+	themes := all()
+	out := make([]string, 0, len(themes))
+	for _, t := range themes {
 		out = append(out, t.Name)
 	}
 	sort.Strings(out)
@@ -95,7 +125,7 @@ func Set(name string) error {
 	if name == "" {
 		return nil
 	}
-	for _, t := range builtin {
+	for _, t := range all() {
 		if t.Name == name {
 			mu.Lock()
 			current = t
@@ -103,12 +133,12 @@ func Set(name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("unknown theme %q (have: %s)", name, strings.Join(Names(), ", "))
+	return fmt.Errorf("unknown theme %q", name)
 }
 
 // Get looks up a theme by name, for listing swatches without selecting it.
 func Get(name string) (Theme, bool) {
-	for _, t := range builtin {
+	for _, t := range all() {
 		if t.Name == name {
 			return t, true
 		}
@@ -128,13 +158,14 @@ func Current() Theme {
 func Next() string {
 	mu.Lock()
 	defer mu.Unlock()
-	for i, t := range builtin {
+	themes := all()
+	for i, t := range themes {
 		if t.Name == current.Name {
-			current = builtin[(i+1)%len(builtin)]
+			current = themes[(i+1)%len(themes)]
 			return current.Name
 		}
 	}
-	current = builtin[0]
+	current = themes[0]
 	return current.Name
 }
 

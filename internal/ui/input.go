@@ -39,6 +39,12 @@ func (a *App) readKeys() {
 			if n, part := skipAPC(pending); part {
 				break
 			} else if n > 0 {
+				// Graphics replies are suppressed on success, so anything
+				// that arrives is the terminal objecting. Saying so is the
+				// difference between a blank rectangle and a reason for it.
+				if msg := graphicsError(pending[:n]); msg != "" {
+					a.logf("album art: %s", msg)
+				}
 				pending = pending[n:]
 				continue
 			}
@@ -105,13 +111,17 @@ func (a *App) handleKey(c byte) bool {
 	switch c {
 	case 'q', 3: // q or ctrl-c
 		return true
-	case 'j', 14:
+	case 'j', 14, keyDown:
 		a.moveCursor(1)
-	case 'k', 16:
+	case 'k', 16, keyUp:
 		a.moveCursor(-1)
-	case 'g':
+	case keyPgDn:
+		a.moveCursor(8)
+	case keyPgUp:
+		a.moveCursor(-8)
+	case 'g', keyHome:
 		a.setCursor(0)
-	case 'G':
+	case 'G', keyEnd:
 		a.mu.Lock()
 		n := len(a.rows)
 		a.mu.Unlock()

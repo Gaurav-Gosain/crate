@@ -111,9 +111,9 @@ func (a *App) handleSearchKey(c byte) bool {
 		a.mode, a.results = modeList, nil
 		a.mu.Unlock()
 		a.redraw()
-	case 'j', 14:
+	case 'j', 14, keyDown:
 		a.moveResult(1)
-	case 'k', 16:
+	case 'k', 16, keyUp:
 		a.moveResult(-1)
 	case '\r', '\n':
 		a.mu.Lock()

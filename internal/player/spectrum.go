@@ -36,9 +36,14 @@ type Spectrum struct {
 	// than flickering; peaks hang briefly like a real analyser.
 	smoothed []float64
 	peaks    []float64
-	window   []float64
-	ready    bool
-	err      error
+	// agc tracks how loud the loudest bar has been recently, so the display
+	// uses its full height whatever the track is mastered at. Without it a
+	// quiet record draws a row of stubs and a loud one slams into the
+	// ceiling, and neither shows what the music is doing.
+	agc    float64
+	window []float64
+	ready  bool
+	err    error
 }
 
 // Analyse decodes a file in the background and returns immediately. The bars
@@ -108,8 +113,11 @@ func (s *Spectrum) BarsWithPeaks(pos time.Duration, n int) ([]float64, []float64
 		if v >= s.peaks[i] {
 			s.peaks[i] = v
 		} else {
-			// Fall slowly, and a little faster the further it has to go.
-			s.peaks[i] -= 0.012 + 0.05*(s.peaks[i]-v)
+			// Fall steadily, and faster the further behind the bar it is.
+			// Hanging on too long leaves a mark floating over a short bar
+			// with nothing under it, which reads as a glitch rather than as
+			// a peak that is on its way down.
+			s.peaks[i] -= 0.03 + 0.14*(s.peaks[i]-v)
 			if s.peaks[i] < v {
 				s.peaks[i] = v
 			}
@@ -231,6 +239,42 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 			s.smoothed[i] = s.smoothed[i]*0.72 + v*0.28
 		}
 	}
+
+	return s.normalise()
+}
+
+// normalise scales the bars so the loudest reaches near the top.
+//
+// The gain follows the recent peak: quickly when the music gets louder, so a
+// transient is not clipped, and slowly when it gets quieter, so the display
+// settles rather than pumping. It refuses to amplify near silence, which
+// would turn the noise floor between tracks into a full height display.
+func (s *Spectrum) normalise() []float64 {
+	peak := 0.0
+	for _, v := range s.smoothed {
+		if v > peak {
+			peak = v
+		}
+	}
+	if peak > s.agc {
+		s.agc += (peak - s.agc) * 0.35
+	} else {
+		s.agc += (peak - s.agc) * 0.02
+	}
+	if s.agc < 0.18 {
+		s.agc = 0.18
+	}
+
+	scale := 0.96 / s.agc
+	out := make([]float64, len(s.smoothed))
+	for i, v := range s.smoothed {
+		x := v * scale
+		if x > 1 {
+			x = 1
+		}
+		out[i] = x
+	}
+	return out
 	return append([]float64(nil), s.smoothed...)
 }
 

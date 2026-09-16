@@ -26,7 +26,6 @@ type art struct {
 	id   uint32
 	data string // the pixels, base64 encoded
 	px   int
-	sent atomic.Bool
 }
 
 // graphicsSupported reports whether the terminal understands the protocol.
@@ -96,26 +95,20 @@ func loadArt(ctx context.Context, src string, px int) (*art, error) {
 // chunkSize is the largest payload the protocol allows in one escape.
 const chunkSize = 4096
 
-// place returns the escape sequence drawing the cover at the cursor.
+// transmitCmd stores the image in the terminal without displaying it.
 //
-// The pixels are sent inline rather than by writing a temp file and handing
-// over its path. The file route needs the terminal to agree that the path is
-// somewhere it is willing to read, which depends on the terminal, the
-// platform's idea of a temporary directory, and whether the file survives long
-// enough to be read. Sending the bytes has none of those failure modes, and
-// they are only sent once.
+// Transmission is separated from placement, and sent on its own rather than
+// as part of a frame, for two reasons. A frame is wrapped in a synchronised
+// update, and burying a few hundred kilobytes of image inside one asks the
+// terminal to buffer the lot before it may draw anything. And every frame
+// begins by clearing the screen, which discards placements; keeping the
+// stored image and the placement separate means a cleared screen costs only
+// the placement, which the next frame puts back for a handful of bytes.
 //
-// The first call transmits and displays; every later call only places the
-// image the terminal already holds. Transmitting every frame would leave the
-// terminal holding a fresh copy each time, which is how a picture viewer ends
-// up using a gigabyte of the terminal's memory in a minute.
-//
-// C=1 leaves the cursor alone so text can be drawn beside the image.
-func (a *art) place(cols, rows int) string {
-	if !a.sent.CompareAndSwap(false, true) {
-		return fmt.Sprintf("\x1b_Ga=p,i=%d,c=%d,r=%d,C=1,q=2;\x1b\\", a.id, cols, rows)
-	}
-
+// q=1 suppresses the success reply but keeps errors, so a refusal is visible
+// rather than silent. That matters: the first version of this sent an image
+// the terminal declined and left a blank rectangle with nothing to explain it.
+func (a *art) transmitCmd() string {
 	var b strings.Builder
 	data := a.data
 	first := true
@@ -131,14 +124,20 @@ func (a *art) place(cols, rows int) string {
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(&b, "\x1b_Ga=T,i=%d,f=24,s=%d,v=%d,c=%d,r=%d,C=1,q=2,m=%d;%s\x1b\\",
-				a.id, a.px, a.px, cols, rows, more, part)
+			fmt.Fprintf(&b, "\x1b_Ga=t,i=%d,f=24,s=%d,v=%d,q=1,m=%d;%s\x1b\\",
+				a.id, a.px, a.px, more, part)
 			first = false
 			continue
 		}
 		fmt.Fprintf(&b, "\x1b_Gm=%d;%s\x1b\\", more, part)
 	}
 	return b.String()
+}
+
+// place draws the stored image at the cursor. C=1 leaves the cursor alone so
+// text can be drawn beside it.
+func (a *art) place(cols, rows int) string {
+	return fmt.Sprintf("\x1b_Ga=p,i=%d,c=%d,r=%d,C=1,q=1;\x1b\\", a.id, cols, rows)
 }
 
 // deleteCmd frees the image inside the terminal. d=I deletes by id and
