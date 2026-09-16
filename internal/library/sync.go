@@ -6,7 +6,9 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -106,6 +108,12 @@ func TriggerScan(ctx context.Context, c *config.Config) error {
 	if c.Remote.ScanURL == "" {
 		return nil
 	}
+	// Without credentials the request is answered, politely, with a refusal.
+	// Saying so here is the difference between a sync that admits it did not
+	// reindex and one that claims success while the library never updates.
+	if c.Remote.ScanUser == "" || c.Remote.ScanPass == "" {
+		return fmt.Errorf("no scan credentials: set remote.scan_user and remote.scan_pass in %s", config.Path())
+	}
 	salt := make([]byte, 8)
 	if _, err := rand.Read(salt); err != nil {
 		return err
@@ -136,7 +144,37 @@ func TriggerScan(ctx context.Context, c *config.Config) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("scan trigger: http %d", resp.StatusCode)
 	}
-	return nil
+	// Subsonic answers every request with 200, including the ones it refused,
+	// and puts the verdict in the body. Trusting the status code alone is how
+	// a scan that never ran reports itself as a success.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return err
+	}
+	return subsonicError(body)
+}
+
+// subsonicError reports whatever the server actually said.
+func subsonicError(body []byte) error {
+	var r struct {
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"subsonic-response"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return fmt.Errorf("scan trigger: unreadable reply: %s", strings.TrimSpace(string(body)))
+	}
+	if r.Response.Status == "ok" {
+		return nil
+	}
+	if msg := r.Response.Error.Message; msg != "" {
+		return fmt.Errorf("scan refused: %s (code %d)", msg, r.Response.Error.Code)
+	}
+	return fmt.Errorf("scan refused: status %q", r.Response.Status)
 }
 
 // ClearStaging empties the local library after a successful mirror.
