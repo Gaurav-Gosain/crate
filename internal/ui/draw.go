@@ -36,7 +36,15 @@ func (a *App) draw() {
 	// Synchronised update: the terminal presents a whole frame rather than
 	// tearing partway through.
 	b.WriteString("\x1b[?2026h")
-	b.WriteString("\x1b[2J")
+	// Play mode clears its own area, cell by cell, leaving the rectangle the
+	// album art occupies untouched. Erasing the whole screen takes the image
+	// with it: the terminal treats the cells as cleared and the picture is
+	// gone, after which every attempt to place it again reports an image that
+	// does not exist.
+	inPlayView := m == modePlay || (m == modeOverlay && func() mode { a.mu.Lock(); defer a.mu.Unlock(); return a.prevMode }() == modePlay)
+	if !inPlayView {
+		b.WriteString("\x1b[2J")
+	}
 
 	a.drawHeader(&b, w, rows, busy, searching, started)
 

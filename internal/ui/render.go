@@ -165,6 +165,44 @@ func truncate(s string, w int) string {
 	return b.String()
 }
 
+// wrapCells wraps s into at most maxLines lines of at most w cells, breaking
+// at spaces where it can. The last line is truncated with an ellipsis when the
+// rest does not fit. A long title shown on two lines can be read whole, where
+// a single truncated line loses exactly the part that distinguishes it.
+func wrapCells(s string, w, maxLines int) []string {
+	if w <= 0 || maxLines <= 0 {
+		return nil
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	cur := ""
+	for _, word := range words {
+		switch {
+		case cur == "":
+			cur = word
+		case visibleWidth(cur)+1+visibleWidth(word) <= w:
+			cur += " " + word
+		default:
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	lines = append(lines, cur)
+	if len(lines) > maxLines {
+		// Everything that did not fit is folded into the last visible line so
+		// the ellipsis lands where the cut happened.
+		lines[maxLines-1] = strings.Join(lines[maxLines-1:], " ")
+		lines = lines[:maxLines]
+	}
+	for i := range lines {
+		lines[i] = truncate(lines[i], w)
+	}
+	return lines
+}
+
 func pad(s string, w int) string {
 	n := visibleWidth(s)
 	if n >= w {

@@ -168,11 +168,6 @@ func (a *App) playSelected() {
 			return
 		}
 
-		// Send the pixels before publishing the cover, not after. Published
-		// first, a frame can place an image the terminal has not been given
-		// yet, and it answers every such frame with "image not found".
-		a.write(art.transmitCmd())
-
 		a.mu.Lock()
 		if a.coverFor == song.Rel {
 			a.cover = art
@@ -265,6 +260,12 @@ func (a *App) movePlayCursor(d, n int) {
 }
 
 // drawPlay renders the whole play view.
+//
+// The screen is three panels: the library on the left, the now playing panel
+// top right, and the spectrum under it. The now playing panel is sized to its
+// content, artwork plus a transport line, rather than to a fixed fraction of
+// the screen; sized by fraction it was mostly empty on a tall terminal, which
+// is exactly the void the panel used to read as.
 func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	a.mu.Lock()
 	loading := a.playLoading
@@ -283,6 +284,7 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	}
 
 	if loading {
+		clearExcept(b, w, top, contentH, rect{})
 		moveTo(b, top+1, 4)
 		fmt.Fprintf(b, "%sopening the record player...%s", muted, reset)
 		return
@@ -293,44 +295,124 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 		st = p.State()
 	}
 
-	listW := w / 3
-	if listW < 26 {
-		listW = 26
-	}
-	if listW > 44 {
-		listW = 44
+	lay := playLayout(w, top, contentH)
+
+	// Work out where the artwork sits before clearing, so those cells can be
+	// left alone. Everything else on screen is wiped and redrawn.
+	artBox := a.artRect(lay.now.inner())
+	clearExcept(b, w, top, contentH, artBox)
+
+	panel(b, lay.list, fmt.Sprintf("library · %d tracks", len(songs)), true)
+	panel(b, lay.now, "now playing", false)
+	if lay.spec.h > 0 {
+		panel(b, lay.spec, "spectrum", false)
 	}
 
-	listBox := rect{1, top, listW, contentH}
-	rightX := listW + 2
-	rightW := w - listW - 2
+	trackNo := 0
+	if now.Rel != "" {
+		for i := range songs {
+			if songs[i].Rel == now.Rel {
+				trackNo = i + 1
+				break
+			}
+		}
+	}
+
+	a.drawPlayList(b, songs, cursor, now, lay.list.inner())
+	a.drawNowPanel(b, st, now, cover, lay.now.inner(), trackNo, len(songs))
+	if lay.spec.h > 0 {
+		a.drawSpectrum(b, st, sp, lay.spec.inner())
+	}
+}
+
+// playPanels is where the three panels of the play view land. spec has zero
+// height when the screen is too short to give the visualiser a useful one.
+type playPanels struct {
+	list, now, spec rect
+}
+
+// playLayout works out the three panel rectangles.
+//
+// It is a pure function of the screen size so the arithmetic can be asserted:
+// the panels have to tile the content area exactly, and the now playing panel
+// has to come out tall enough for its artwork and transport line.
+func playLayout(w, top, contentH int) playPanels {
+	// A column of margin either side, so the panels read as objects on the
+	// screen rather than as a grid welded to its edges.
+	const margin = 1
+
+	listW := clamp(w/3, 26, 50)
+	if listW > w-44 {
+		listW = max(24, w-44)
+	}
+
+	list := rect{1 + margin, top, listW, contentH}
+	rightX := list.x + listW + 1
+	rightW := w - margin - rightX + 1
 	if rightW < 20 {
 		rightW = 20
 	}
 
-	nowH := contentH * 3 / 5
-	if nowH < 7 {
-		nowH = 7
+	// The artwork sets the panel height: rows for the art, one blank row, the
+	// transport, and the two border rows. The art gets what the screen can
+	// spare once the spectrum has a workable height.
+	artRows := clamp(contentH-13, 7, 16)
+	nowH := artRows + 4
+	if nowH > contentH {
+		nowH = contentH
 	}
 	specH := contentH - nowH
-	if specH < 4 {
-		specH = 4
-		nowH = contentH - specH
+	if specH < 5 {
+		// Too short to split: the spectrum is dropped rather than squeezed
+		// into a strip of border with one row of bars inside it.
+		specH = 0
+		nowH = contentH
 	}
 
-	nowBox := rect{rightX, top, rightW, nowH}
-	specBox := rect{rightX, top + nowH, rightW, specH}
-
-	panel(b, listBox, fmt.Sprintf("library  %d", len(songs)), true)
-	panel(b, nowBox, "now playing", false)
-	panel(b, specBox, "", false)
-
-	a.drawPlayList(b, songs, cursor, now, listBox.inner())
-	a.drawNowPanel(b, st, now, cover, nowBox.inner())
-	a.drawSpectrum(b, st, sp, specBox.inner())
+	return playPanels{
+		list: list,
+		now:  rect{rightX, top, rightW, nowH},
+		spec: rect{rightX, top + nowH, rightW, specH},
+	}
 }
 
-// drawPlayList shows the library with the playing track marked.
+// playRow is one line of the library pane: a song, an artist heading, or the
+// blank row that separates one artist's group from the next.
+type playRow struct {
+	song   int    // index into songs, or -1
+	header string // artist name when this row is a heading
+}
+
+// buildPlayRows lays the library out as artist groups.
+//
+// A flat run of nine hundred titles gives the eye nothing to hold on to; the
+// headings are what let a reader keep track of where in the library they are.
+// It also returns each song's display position, so the scroll window can be
+// centred on the cursor in display rows rather than song indices.
+func buildPlayRows(songs []library.Song) ([]playRow, []int) {
+	rows := make([]playRow, 0, len(songs)+16)
+	pos := make([]int, len(songs))
+	last := "\x00" // never equal to a real artist, including the empty one
+	for i, s := range songs {
+		if s.Artist != last {
+			if len(rows) > 0 {
+				rows = append(rows, playRow{song: -1})
+			}
+			name := s.Artist
+			if name == "" {
+				name = "unknown artist"
+			}
+			rows = append(rows, playRow{song: -1, header: name})
+			last = s.Artist
+		}
+		pos[i] = len(rows)
+		rows = append(rows, playRow{song: i})
+	}
+	return rows, pos
+}
+
+// drawPlayList shows the library grouped by artist, with the playing track
+// marked and the selected one filled.
 func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int, now library.Song, r rect) {
 	if r.h < 1 {
 		return
@@ -341,152 +423,293 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 		return
 	}
 
-	start := cursor - r.h/2
-	if start < 0 {
-		start = 0
+	rows, pos := buildPlayRows(songs)
+	cp := 0
+	if cursor >= 0 && cursor < len(pos) {
+		cp = pos[cursor]
 	}
-	if start+r.h > len(songs) {
-		start = len(songs) - r.h
+	start := cp - r.h/2
+	if start > len(rows)-r.h {
+		start = len(rows) - r.h
 	}
 	if start < 0 {
 		start = 0
 	}
 
-	a.mu.Lock()
-	a.hitList, a.hitListTop = r, start
-	a.mu.Unlock()
+	// Which song each visible row is, for turning a click back into a track.
+	// Headings and spacers map to none.
+	rowSong := make([]int, r.h)
+	for i := range rowSong {
+		rowSong[i] = -1
+	}
 
-	for i := 0; i < r.h && start+i < len(songs); i++ {
-		s := songs[start+i]
-		moveTo(b, r.y+i, r.x)
+	x0 := r.x + 1
+	avail := r.w - 2
+	for i := 0; i < r.h && start+i < len(rows); i++ {
+		row := rows[start+i]
+		if row.song < 0 {
+			if row.header == "" {
+				continue
+			}
+			name := truncate(row.header, avail-4)
+			fill := avail - visibleWidth(name) - 1
+			moveTo(b, r.y+i, x0)
+			fmt.Fprintf(b, "%s%s%s%s ", bold, muted, name, reset)
+			if fill > 0 {
+				fmt.Fprintf(b, "%s%s%s", rule, strings.Repeat("─", fill), reset)
+			}
+			continue
+		}
+
+		rowSong[i] = row.song
+		s := songs[row.song]
 		playing := s.Rel == now.Rel && now.Rel != ""
 		mark := "  "
 		if playing {
 			mark = "▸ "
 		}
-		label := truncate(s.Title, r.w-2)
-		if start+i == cursor {
+		titleW := avail - 2
+		label := truncate(s.Title, titleW)
+		if row.song == cursor {
 			// The selected row scrolls when its title does not fit, so a long
 			// name can still be read without widening the panel.
-			label = marquee(s.Title, r.w-2, time.Now())
+			label = marquee(s.Title, titleW, time.Now())
 		}
+		moveTo(b, r.y+i, r.x)
 		switch {
-		case start+i == cursor:
+		case row.song == cursor:
 			// Selected rows are filled rather than merely coloured. Colour
 			// alone is ambiguous next to the playing row, which is also
 			// coloured, and the two are often the same row.
 			t := theme.Current()
-			fmt.Fprintf(b, "%s%s%s%s%s%s", theme.Bg(t.Accent), theme.Ink(t.Accent), mark, label,
-				strings.Repeat(" ", max(0, r.w-2-visibleWidth(label))), reset)
+			fmt.Fprintf(b, "%s%s %s%s%s%s", theme.Bg(t.Accent), theme.Ink(t.Accent), mark, label,
+				strings.Repeat(" ", max(0, r.w-3-visibleWidth(label))), reset)
 		case playing:
-			fmt.Fprintf(b, "%s%s%s%s", accent, mark, label, reset)
+			fmt.Fprintf(b, " %s%s%s%s", accent, mark, label, reset)
 		default:
-			fmt.Fprintf(b, "%s%s%s%s", muted, mark, label, reset)
+			fmt.Fprintf(b, " %s%s%s%s%s", mark, fg, label, reset, "")
+		}
+	}
+
+	a.mu.Lock()
+	a.hitList, a.hitListTop = r, start
+	a.hitPlayRows = rowSong
+	a.mu.Unlock()
+}
+
+// artRect returns the cells the artwork occupies inside the now playing panel.
+// The geometry lives here rather than inside the drawing so the clearing pass
+// can avoid exactly those cells.
+func (a *App) artRect(r rect) rect {
+	if r.h < 5 || r.w < 16 {
+		return rect{}
+	}
+	// Rows for the art, a blank row, and the transport line fill the panel
+	// exactly, so there is no dead band above or below.
+	artRows := r.h - 2
+	artCols := artRows * 2
+	if artCols > r.w/2 {
+		// A narrow panel caps the art by width instead. Kept even so the
+		// halved value stays square.
+		artCols = r.w / 2
+		artCols -= artCols % 2
+		artRows = artCols / 2
+	}
+	if artRows < 2 || artCols < 4 {
+		return rect{}
+	}
+	artY := r.y + max(0, (r.h-2-artRows)/2)
+	return rect{r.x + 1, artY, artCols, artRows}
+}
+
+// clearExcept blanks the content area a row at a time, skipping any cells
+// inside keep. Writing spaces over a cell erases it just as a screen clear
+// would, so the artwork has to be stepped around rather than painted over.
+func clearExcept(b *strings.Builder, w, top, h int, keep rect) {
+	for y := top; y < top+h; y++ {
+		if keep.w == 0 || y < keep.y || y >= keep.y+keep.h {
+			moveTo(b, y, 1)
+			b.WriteString(strings.Repeat(" ", w))
+			continue
+		}
+		if keep.x > 1 {
+			moveTo(b, y, 1)
+			b.WriteString(strings.Repeat(" ", keep.x-1))
+		}
+		if right := w - (keep.x + keep.w) + 1; right > 0 {
+			moveTo(b, y, keep.x+keep.w)
+			b.WriteString(strings.Repeat(" ", right))
 		}
 	}
 }
 
-// drawNowPanel draws the cover, the track details and the progress bar.
-func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song, cover *art, r rect) {
+// drawNowPanel draws the cover, the track details and the transport.
+func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song, cover *art, r rect, trackNo, total int) {
 	if r.h < 5 || r.w < 16 {
 		return
 	}
 
-	// The artwork is square, and terminal cells are about twice as tall as
-	// they are wide, so a square needs twice as many columns as rows.
-	artRows := r.h - 2
-	if artRows > 14 {
-		artRows = 14
+	ar := a.artRect(r)
+	if ar.w == 0 {
+		return
 	}
-	artCols := artRows * 2
-	if artCols > r.w/2 {
-		artCols = r.w / 2
-		artRows = artCols / 2
-	}
-
-	// Centre the artwork in the space above the transport rather than
-	// pinning it to the top, which left the panel looking half empty.
-	artY := r.y + max(0, (r.h-1-artRows)/2)
 
 	if cover != nil {
-		moveTo(b, artY, r.x)
-		b.WriteString(cover.place(artCols, artRows))
+		// The placement rides in the frame at the cursor, so position first.
+		// displayCmd remembers where it last placed the image and sends
+		// nothing when the rectangle has not moved.
+		moveTo(b, ar.y, ar.x)
+		b.WriteString(cover.displayCmd(ar))
 	} else {
 		// No cover, or a terminal that cannot show one: spin a record instead.
 		rot := float64(time.Now().UnixMilli()%2600) / 2600 * 2 * math.Pi
 		if !st.Playing {
 			rot = float64(st.Position.Milliseconds()%2600) / 2600 * 2 * math.Pi
 		}
-		for i, line := range vinyl(artCols, artRows, rot, theme.Current()) {
-			moveTo(b, artY+i, r.x)
+		for i, line := range vinyl(ar.w, ar.h, rot, theme.Current()) {
+			moveTo(b, ar.y+i, ar.x)
 			b.WriteString(line)
 		}
 	}
 
-	tx := r.x + artCols + 3
-	tw := r.x + r.w - tx
-	if tw > 4 {
-		// The details sit level with the middle of the artwork.
-		ty := artY + max(0, artRows/2-1)
+	// The details, as a block beside the art: title, artist, album, then a
+	// quiet line placing the track in the library. The block is centred on
+	// the art so the two read as one composition.
+	tx := ar.x + ar.w + 3
+	tw := r.x + r.w - tx - 1
+	if tw >= 12 {
+		type line struct{ style, text string }
+		var lines []line
 		if now.Rel == "" {
-			moveTo(b, ty, tx)
-			fmt.Fprintf(b, "%sselect a track and press enter%s", muted, reset)
-		} else {
-			moveTo(b, ty, tx)
-			fmt.Fprintf(b, "%s%s%s%s", bold, fg, truncate(now.Title, tw), reset)
-			moveTo(b, ty+1, tx)
-			fmt.Fprintf(b, "%s%s%s", accent, truncate(now.Artist, tw), reset)
-			if now.Album != "" {
-				moveTo(b, ty+2, tx)
-				fmt.Fprintf(b, "%s%s%s", muted, truncate(now.Album, tw), reset)
+			lines = []line{
+				{muted, "nothing playing"},
+				{"", ""},
+				{muted, "enter plays the selected track"},
 			}
+		} else {
+			for _, tl := range wrapCells(now.Title, tw, 2) {
+				lines = append(lines, line{bold + fg, tl})
+			}
+			if now.Artist != "" {
+				lines = append(lines, line{accent, truncate(now.Artist, tw)})
+			}
+			if now.Album != "" {
+				lines = append(lines, line{muted, truncate(now.Album, tw)})
+			}
+			meta := ""
+			if trackNo > 0 && total > 0 {
+				meta = fmt.Sprintf("track %d of %d", trackNo, total)
+			}
+			if ext := strings.TrimPrefix(strings.ToLower(pathExt(now.Rel)), "."); ext != "" {
+				if meta != "" {
+					meta += " · "
+				}
+				meta += ext
+			}
+			if meta != "" {
+				lines = append(lines, line{"", ""}, line{muted, truncate(meta, tw)})
+			}
+		}
+		ty := ar.y + max(0, (ar.h-len(lines))/2)
+		for i, ln := range lines {
+			if ty+i > r.y+r.h-3 {
+				break
+			}
+			if ln.text == "" {
+				continue
+			}
+			moveTo(b, ty+i, tx)
+			fmt.Fprintf(b, "%s%s%s", ln.style, ln.text, reset)
 		}
 	}
 
-	// Transport, along the bottom of the panel.
-	row := r.y + r.h - 1
-	icon := "▶"
-	if st.Playing {
-		icon = "❚❚"
-	}
-	moveTo(b, row, r.x)
-	fmt.Fprintf(b, "%s%s%s ", accent, icon, reset)
+	a.drawTransport(b, st, rect{r.x + 1, r.y + r.h - 1, r.w - 2, 1})
+}
 
-	times := fmt.Sprintf(" %s / %s", clock(st.Position), clock(st.Duration))
-	barW := r.w - visibleWidth(times) - 4
+// drawTransport draws the play state, elapsed time, position bar and time
+// remaining along one row, and records the bar as the click target for seeks.
+func (a *App) drawTransport(b *strings.Builder, st player.State, r rect) {
+	// The icon reports state rather than naming the key: a turning record
+	// shows an arrow, a paused one shows the bars.
+	icon, style := "▶", accent
+	if !st.Playing {
+		icon, style = "❚❚", muted
+	}
+
+	elapsed := clock(st.Position)
+	remain := "-" + clock(max(0, st.Duration-st.Position))
+	if st.Duration == 0 {
+		remain = "-0:00"
+	}
+
+	barX := r.x + 2 + 2 + visibleWidth(elapsed) + 2
+	barW := r.x + r.w - barX - visibleWidth(remain) - 2
 	if barW < 6 {
 		barW = 6
 	}
+
 	pct := 0.0
 	if st.Duration > 0 {
 		pct = st.Position.Seconds() / st.Duration.Seconds()
 	}
-	moveTo(b, row, r.x+3)
+
+	moveTo(b, r.y, r.x)
+	fmt.Fprintf(b, "%s%s%s", style, pad(icon, 2), reset)
+	moveTo(b, r.y, r.x+4)
+	fmt.Fprintf(b, "%s%s%s", fg, elapsed, reset)
+	moveTo(b, r.y, barX)
 	b.WriteString(progress(pct, barW))
-	fmt.Fprintf(b, "%s%s%s", muted, times, reset)
+	moveTo(b, r.y, barX+barW+2)
+	fmt.Fprintf(b, "%s%s%s", muted, remain, reset)
 
 	a.mu.Lock()
-	a.hitProgress = rect{r.x + 3, row, barW, 1}
+	a.hitProgress = rect{barX, r.y, barW, 1}
 	a.mu.Unlock()
 }
 
-// drawSpectrum draws the visualiser.
+// drawSpectrum draws the visualiser, inset from the panel border so the bars
+// have air around them, with a baseline for the bars to stand on.
 func (a *App) drawSpectrum(b *strings.Builder, st player.State, sp *player.Spectrum, r rect) {
-	if r.h < 2 || r.w < 8 || sp == nil {
+	if r.h < 3 || r.w < 12 || sp == nil {
 		return
 	}
-	vals, peaks := sp.BarsWithPeaks(st.Position, BarCount(r.w))
-	for i, line := range spectrumBars(vals, peaks, r.h, theme.Current()) {
-		moveTo(b, r.y+i, r.x)
+	x0, w0 := r.x+2, r.w-4
+	y0, h0 := r.y+1, r.h-2
+	if h0 < 2 || w0 < 5 {
+		return
+	}
+
+	n := BarCount(w0)
+	used := n*3 - 1
+	off := (w0 - used) / 2
+
+	vals, peaks := sp.BarsWithPeaks(st.Position, n)
+	for i, line := range spectrumBars(vals, peaks, h0-1, theme.Current()) {
+		moveTo(b, y0+i, x0+off)
 		b.WriteString(line)
 	}
+	// The baseline gives the bars a floor to stand on; without it they hang
+	// against the border below them.
+	moveTo(b, y0+h0-1, x0+off)
+	fmt.Fprintf(b, "%s%s%s", rule, strings.Repeat("▔", used), reset)
+}
+
+// pathExt is filepath.Ext without the import: the extension names the codec
+// on the transport's metadata line.
+func pathExt(p string) string {
+	for i := len(p) - 1; i >= 0 && p[i] != '/'; i-- {
+		if p[i] == '.' {
+			return p[i:]
+		}
+	}
+	return ""
 }
 
 // handleMouse acts on a click, drag or scroll.
 func (a *App) handleMouse(ev mouseEvent) bool {
 	a.mu.Lock()
 	m := a.mode
-	list, top := a.hitList, a.hitListTop
+	list := a.hitList
 	prog := a.hitProgress
 	sources := a.hitSources
 	p := a.player
@@ -512,13 +735,24 @@ func (a *App) handleMouse(ev mouseEvent) bool {
 				break
 			}
 			if ev.kind == mousePress && list.contains(ev.x, ev.y) {
-				idx := top + (ev.y - list.y)
+				// Rows are looked up rather than computed: the list holds
+				// artist headings and spacers as well as songs, so the row
+				// under the pointer is not simply top plus offset.
+				row := ev.y - list.y
+				idx := -1
 				a.mu.Lock()
+				if row >= 0 && row < len(a.hitPlayRows) {
+					idx = a.hitPlayRows[row]
+				}
 				if idx >= 0 && idx < len(a.songs) {
 					a.playCursor = idx
+				} else {
+					idx = -1
 				}
 				a.mu.Unlock()
-				go a.playSelected()
+				if idx >= 0 {
+					go a.playSelected()
+				}
 			}
 		}
 	case modeList:

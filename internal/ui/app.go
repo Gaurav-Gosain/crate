@@ -112,6 +112,7 @@ type App struct {
 	// and keeping the two copies in step.
 	hitList     rect
 	hitListTop  int
+	hitPlayRows []int
 	hitProgress rect
 	hitSources  rect
 

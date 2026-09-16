@@ -345,11 +345,14 @@ func marquee(s string, w int, now time.Time) string {
 	if full <= w {
 		return s
 	}
-	gap := 4
+	gap := 6
 	period := full + gap
-	// One column every 180ms, with the first second of each pass held still.
-	const step = 180 * time.Millisecond
-	const hold = 5 // steps held at the start
+	// A column every 320ms, and the first two and a half seconds of each pass
+	// held still. Scrolling immediately, and quickly, means the title is
+	// moving before the eye has settled on it and is never legible; the pause
+	// is what makes it readable rather than merely animated.
+	const step = 320 * time.Millisecond
+	const hold = 8 // steps held at the start, about two and a half seconds
 	ticks := int(now.UnixMilli()/int64(step/time.Millisecond)) % (period + hold)
 	off := ticks - hold
 	if off < 0 {

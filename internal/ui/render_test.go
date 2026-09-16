@@ -139,3 +139,16 @@ func TestMarqueeHandlesWideRunes(t *testing.T) {
 		}
 	}
 }
+
+// The marquee has to hold still long enough to be read before it moves. It
+// scrolled immediately and quickly at first, which meant the title was in
+// motion before the eye had settled on it.
+func TestMarqueeHoldsBeforeScrolling(t *testing.T) {
+	long := "a very long track title that will not fit in the panel"
+	first := marquee(long, 16, time.UnixMilli(0))
+	for ms := int64(0); ms < 2000; ms += 100 {
+		if got := marquee(long, 16, time.UnixMilli(ms)); got != first {
+			t.Fatalf("started scrolling after only %dms", ms)
+		}
+	}
+}

@@ -104,7 +104,9 @@ func progress(pct float64, w int) string {
 			if i == pos+1 {
 				b.WriteString(reset + rule)
 			}
-			b.WriteString("━")
+			// The travelled part is heavy and the rest light, so the track
+			// reads as a position at a glance rather than as a solid rule.
+			b.WriteString("─")
 		}
 	}
 	b.WriteString(reset)
