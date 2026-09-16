@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -331,12 +332,26 @@ func (a *App) handleOverlayMouse(ev mouseEvent) {
 	}
 }
 
+// marqueePhase remembers when the current label appeared, so the pause at the
+// start of a pass is measured from then.
+//
+// The phase has to belong to the label rather than to the clock. Deriving it
+// from wall time, as this first did, means the hold only lands at the start of
+// some global cycle: select a row part way through one and its title is
+// already mid scroll, which is exactly the complaint that the pause did not
+// work. Keying on the text resets it whenever the selection changes.
+var marqueePhase struct {
+	mu    sync.Mutex
+	key   string
+	since time.Time
+}
+
 // marquee scrolls a string that does not fit, so a long title can still be
 // read in full when it is the one selected.
 //
-// It pauses at the start of each pass. A label that slides continuously is
-// hard to read; one that holds still for a moment, travels, and then starts
-// again can be taken in.
+// It holds still at the start of each pass. A label that slides continuously
+// is hard to read; one that sits still long enough to be taken in, travels,
+// and then starts again can be.
 func marquee(s string, w int, now time.Time) string {
 	if w <= 0 {
 		return ""
@@ -345,20 +360,26 @@ func marquee(s string, w int, now time.Time) string {
 	if full <= w {
 		return s
 	}
-	gap := 6
-	period := full + gap
-	// A column every 320ms, and the first two and a half seconds of each pass
-	// held still. Scrolling immediately, and quickly, means the title is
-	// moving before the eye has settled on it and is never legible; the pause
-	// is what makes it readable rather than merely animated.
-	const step = 320 * time.Millisecond
-	const hold = 8 // steps held at the start, about two and a half seconds
-	ticks := int(now.UnixMilli()/int64(step/time.Millisecond)) % (period + hold)
-	off := ticks - hold
-	if off < 0 {
-		off = 0
+
+	marqueePhase.mu.Lock()
+	if marqueePhase.key != s {
+		marqueePhase.key = s
+		marqueePhase.since = now
+	}
+	elapsed := now.Sub(marqueePhase.since)
+	marqueePhase.mu.Unlock()
+
+	const (
+		hold = 2500 * time.Millisecond // still, long enough to read the start
+		step = 320 * time.Millisecond  // then a column at a time
+	)
+	if elapsed < hold {
+		return sliceCells(s, 0, w)
 	}
 
+	gap := 6
+	period := full + gap
+	off := int((elapsed-hold)/step) % period
 	padded := s + strings.Repeat(" ", gap) + s
 	return sliceCells(padded, off, w)
 }

@@ -145,10 +145,31 @@ func TestMarqueeHandlesWideRunes(t *testing.T) {
 // motion before the eye had settled on it.
 func TestMarqueeHoldsBeforeScrolling(t *testing.T) {
 	long := "a very long track title that will not fit in the panel"
-	first := marquee(long, 16, time.UnixMilli(0))
-	for ms := int64(0); ms < 2000; ms += 100 {
-		if got := marquee(long, 16, time.UnixMilli(ms)); got != first {
-			t.Fatalf("started scrolling after only %dms", ms)
+	// Start part way through wall time, which is the case that was broken:
+	// the pause used to be measured from an absolute clock, so a title that
+	// appeared mid cycle was already scrolling.
+	base := time.UnixMilli(1737000000123)
+	first := marquee(long, 16, base)
+	for ms := int64(0); ms < 2400; ms += 100 {
+		if got := marquee(long, 16, base.Add(time.Duration(ms)*time.Millisecond)); got != first {
+			t.Fatalf("started scrolling %dms after the title appeared", ms)
 		}
+	}
+}
+
+// A different title restarts the pause, rather than inheriting where the
+// previous one had got to.
+func TestMarqueeRestartsForANewTitle(t *testing.T) {
+	base := time.UnixMilli(1737000000123)
+	one := "the first long title that does not fit in the space"
+	two := "a second long title that also does not fit in there"
+	marquee(one, 16, base)
+	scrolled := marquee(one, 16, base.Add(6*time.Second))
+	if scrolled == marquee(one, 16, base) {
+		t.Fatal("the first title never scrolled, so this proves nothing")
+	}
+	fresh := marquee(two, 16, base.Add(6*time.Second))
+	if fresh != marquee(two, 16, base.Add(6*time.Second).Add(time.Second)) {
+		t.Fatal("a newly selected title must hold still, not carry on mid scroll")
 	}
 }

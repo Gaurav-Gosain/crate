@@ -16,9 +16,14 @@ const (
 	// listener can see moving, and decoding a whole track at 44.1kHz costs
 	// four times the memory to show the same bars.
 	sampleRate = 22050
-	// fftSize must be a power of two for the radix-2 transform below. 1024
-	// samples is ~46ms of audio, short enough to track a beat.
-	fftSize = 1024
+	// fftSize must be a power of two for the radix-2 transform below.
+	//
+	// 4096 samples is 186ms of audio and bins 5.4Hz apart. The previous 1024
+	// gave 21.5Hz bins, which is coarser than the spacing of the bars at the
+	// bottom of the display: the lowest eight bars each fell inside a single
+	// bin and neighbouring pairs shared one, so they moved as a block and the
+	// bass end had no detail in it at all.
+	fftSize = 4096
 )
 
 // Spectrum holds a decoded track and turns a playback position into bar
@@ -36,6 +41,13 @@ type Spectrum struct {
 	// than flickering; peaks hang briefly like a real analyser.
 	smoothed []float64
 	peaks    []float64
+	// vel carries how fast a bar is falling, so it accelerates downwards
+	// instead of creeping.
+	vel []float64
+	// Scratch space, kept between frames so a display running fifteen times a
+	// second is not allocating a megabyte a second to throw away.
+	re, im, mag []float64
+	raw, work   []float64
 	// agc tracks how loud the loudest bar has been recently, so the display
 	// uses its full height whatever the track is mastered at. Without it a
 	// quiet record draws a row of stubs and a loud one slams into the
@@ -137,6 +149,9 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	if len(s.smoothed) != n {
 		s.smoothed = make([]float64, n)
 		s.peaks = make([]float64, n)
+		s.vel = make([]float64, n)
+		s.raw = make([]float64, n)
+		s.work = make([]float64, n)
 	}
 	if !s.ready || len(s.samples) == 0 {
 		// Decay whatever was on screen rather than snapping to nothing.
@@ -157,12 +172,25 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		return append([]float64(nil), s.smoothed...)
 	}
 
-	re := make([]float64, fftSize)
-	im := make([]float64, fftSize)
+	if len(s.re) != fftSize {
+		s.re = make([]float64, fftSize)
+		s.im = make([]float64, fftSize)
+		s.mag = make([]float64, fftSize/2)
+	}
+	re, im := s.re, s.im
 	for i := 0; i < fftSize; i++ {
 		re[i] = s.samples[start+i] * s.window[i]
+		im[i] = 0
 	}
 	fft(re, im)
+
+	// Divide by half the window length so a full scale signal comes out at
+	// 0 dB. Without this every bin reads about +54 dB, the scaling below
+	// clamps it, and the display is a solid wall.
+	bins := fftSize / 2
+	for b := 0; b < bins; b++ {
+		s.mag[b] = math.Hypot(re[b], im[b]) / float64(fftSize/2)
+	}
 
 	// Buckets are spaced logarithmically: pitch is logarithmic, so linear
 	// buckets would crowd everything audible into the first few bars.
@@ -170,34 +198,29 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	// The range stops short of both ends. Below about 35 Hz there is nothing
 	// but rumble, and the top octave of a lossy encode is mostly empty, so
 	// including them spends bars on dead air.
-	bins := fftSize / 2
 	lowHz, highHz := 35.0, 14000.0
 	minBin := lowHz * float64(fftSize) / float64(sampleRate)
 	maxBin := highHz * float64(fftSize) / float64(sampleRate)
-	if maxBin > float64(bins) {
-		maxBin = float64(bins)
+	if maxBin > float64(bins-1) {
+		maxBin = float64(bins - 1)
 	}
 
 	for i := 0; i < n; i++ {
-		lo := int(minBin * math.Pow(maxBin/minBin, float64(i)/float64(n)))
-		hi := int(minBin * math.Pow(maxBin/minBin, float64(i+1)/float64(n)))
-		if hi <= lo {
-			hi = lo + 1
-		}
-		if hi > bins {
-			hi = bins
-		}
-		if lo >= bins {
-			lo = bins - 1
-		}
-		peak := 0.0
-		for b := lo; b < hi; b++ {
-			// Divide by half the window length so a full scale signal comes
-			// out at 0 dB. Without this every bin reads about +54 dB, the
-			// scaling below clamps it, and the display is a solid wall.
-			m := math.Hypot(re[b], im[b]) / float64(fftSize/2)
-			if m > peak {
-				peak = m
+		lo := minBin * math.Pow(maxBin/minBin, float64(i)/float64(n))
+		hi := minBin * math.Pow(maxBin/minBin, float64(i+1)/float64(n))
+
+		var peak float64
+		if hi-lo < 1 {
+			// Narrower than a bin. Reading the one bin it lands in makes
+			// neighbouring bars identical wherever several fall inside the
+			// same bin, which is what made the bass end move as a block.
+			// Interpolating gives each bar its own value.
+			peak = s.interp((lo + hi) / 2)
+		} else {
+			for b := int(lo); b <= int(hi) && b < bins; b++ {
+				if s.mag[b] > peak {
+					peak = s.mag[b]
+				}
 			}
 		}
 
@@ -207,15 +230,12 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		// rises. Displayed flat, the left of the analyser is always tall and
 		// the right always dead. Tilting the response upwards with frequency
 		// is what makes the whole width of the display do something.
-		centre := (float64(lo) + float64(hi)) / 2 * float64(sampleRate) / float64(fftSize)
+		centre := (lo + hi) / 2 * float64(sampleRate) / float64(fftSize)
 		if centre < 20 {
 			centre = 20
 		}
 		db += 4.5 * math.Log2(centre/180)
 
-		// Map the useful part of the range. Starting at -70 rather than -60
-		// and stopping at -15 rather than 0 spreads normal listening levels
-		// across the full height instead of bunching them near the top.
 		v := (db + 70) / 55
 		if v < 0 {
 			v = 0
@@ -223,20 +243,40 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		if v > 1 {
 			v = 1
 		}
-		// Gate the bottom. Every bin in a real recording carries a little
-		// energy, and without this they all render one row tall and the
-		// display grows a permanent slab along its base.
 		if v < 0.11 {
 			v = 0
 		} else {
 			v = (v - 0.11) / 0.89
 		}
+		s.raw[i] = v
+	}
 
-		// Rise fast, fall slow.
+	// Let each bar lift its neighbours, falling away with distance. Computed
+	// independently, bars jump about on their own and the display looks like
+	// noise; coupling them is what turns it into the moving landscape an
+	// analyser is supposed to be.
+	spread(s.raw, s.work)
+
+	for i := 0; i < n; i++ {
+		v := s.work[i]
 		if v > s.smoothed[i] {
+			// Rise immediately: a transient that arrives late has been missed.
 			s.smoothed[i] = v
-		} else {
-			s.smoothed[i] = s.smoothed[i]*0.72 + v*0.28
+			s.vel[i] = 0
+			continue
+		}
+		// Fall under gravity rather than by a fixed fraction. A constant decay
+		// crawls the last of the way down and leaves the display looking like
+		// it is still settling from the last bar long after it ended.
+		s.vel[i] += 0.012
+		s.smoothed[i] -= s.vel[i]
+		if s.smoothed[i] < v {
+			s.smoothed[i] = v
+			s.vel[i] = 0
+		}
+		if s.smoothed[i] < 0 {
+			s.smoothed[i] = 0
+			s.vel[i] = 0
 		}
 	}
 
@@ -275,6 +315,48 @@ func (s *Spectrum) normalise() []float64 {
 		out[i] = x
 	}
 	return out
+}
+
+// interp reads the magnitude at a fractional bin, between the two either side.
+func (s *Spectrum) interp(bin float64) float64 {
+	if bin < 0 {
+		bin = 0
+	}
+	i := int(bin)
+	if i >= len(s.mag)-1 {
+		return s.mag[len(s.mag)-1]
+	}
+	f := bin - float64(i)
+	return s.mag[i]*(1-f) + s.mag[i+1]*f
+}
+
+// spread lets every bar raise its neighbours, weaker with distance.
+//
+// This is what gives an analyser its shape. Each bar measures a narrow slice
+// of the spectrum and, left alone, rises and falls independently of the ones
+// beside it, so the display reads as a row of unrelated flickering columns.
+// Coupling them makes a peak a hill rather than a spike, which is both easier
+// to look at and a fairer picture of sound that is never confined to one band.
+func spread(in, out []float64) {
+	const reach = 3
+	for i := range out {
+		out[i] = in[i]
+	}
+	for i, v := range in {
+		if v <= 0 {
+			continue
+		}
+		for d := 1; d <= reach; d++ {
+			// Each step out halves again, so the influence is local.
+			w := v / math.Pow(2, float64(d))
+			if j := i - d; j >= 0 && out[j] < w {
+				out[j] = w
+			}
+			if j := i + d; j < len(out) && out[j] < w {
+				out[j] = w
+			}
+		}
+	}
 }
 
 // hann builds a Hann window, which stops the abrupt ends of each slice from
