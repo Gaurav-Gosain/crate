@@ -1,6 +1,9 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestVisibleWidthIgnoresEscapes(t *testing.T) {
 	cases := []struct {
@@ -77,5 +80,62 @@ func TestTruncateNeverSplitsAWideRune(t *testing.T) {
 	got := truncate("a｜b", 2)
 	if visibleWidth(got) > 2 {
 		t.Fatalf("got %q at %d cells", got, visibleWidth(got))
+	}
+}
+
+// The top edge of a panel has to be exactly as wide as the panel, or its
+// corner sits inside the right edge and neighbouring boxes do not line up.
+func TestTopEdgeIsExactlyPanelWidth(t *testing.T) {
+	for _, title := range []string{"", "library", "now playing", "library  905", "a title far longer than the panel"} {
+		for _, w := range []int{10, 20, 40, 80, 150} {
+			got := visibleWidth(topEdge(w, title, ""))
+			if got != w {
+				t.Fatalf("title=%q w=%d: edge measured %d cells", title, w, got)
+			}
+		}
+	}
+}
+
+// A title that fits is left alone; one that does not scrolls, and every frame
+// of the scroll has to be exactly the width it was given or it disturbs the
+// layout around it.
+func TestMarqueeLeavesShortTitlesAlone(t *testing.T) {
+	if got := marquee("short", 20, time.Unix(0, 0)); got != "short" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMarqueeNeverExceedsItsWidth(t *testing.T) {
+	long := "a very long track title that will not fit in the panel at all"
+	for ms := int64(0); ms < 20000; ms += 137 {
+		got := marquee(long, 18, time.UnixMilli(ms))
+		if w := visibleWidth(got); w > 18 {
+			t.Fatalf("at %dms the marquee was %d cells wide: %q", ms, w, got)
+		}
+	}
+}
+
+func TestMarqueeActuallyMoves(t *testing.T) {
+	long := "a very long track title that will not fit"
+	first := marquee(long, 12, time.UnixMilli(0))
+	moved := false
+	for ms := int64(0); ms < 8000; ms += 180 {
+		if marquee(long, 12, time.UnixMilli(ms)) != first {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		t.Fatal("a title too long to fit never scrolled")
+	}
+}
+
+// Wide runes must not be split in half by the scroll.
+func TestMarqueeHandlesWideRunes(t *testing.T) {
+	s := "｜｜｜｜｜｜｜｜｜｜｜｜"
+	for ms := int64(0); ms < 6000; ms += 180 {
+		if w := visibleWidth(marquee(s, 7, time.UnixMilli(ms))); w > 7 {
+			t.Fatalf("at %dms width was %d", ms, w)
+		}
 	}
 }

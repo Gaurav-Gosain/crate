@@ -38,6 +38,12 @@ type Player struct {
 	sock string
 
 	state State
+	// posAt is when Position was last read from mpv. Between polls the
+	// position is carried forward by the clock: mpv is asked four times a
+	// second but the display draws fifteen, so without this the visualiser
+	// analyses the same moment of audio four frames running and then jumps,
+	// which reads as stuttering rather than as sound.
+	posAt time.Time
 	reqID int
 	// pending maps a request id to the channel waiting for its reply.
 	pending map[int]chan json.RawMessage
@@ -142,6 +148,7 @@ func (p *Player) pollLoop() {
 		if pos, ok := p.getFloat("time-pos"); ok {
 			p.mu.Lock()
 			p.state.Position = time.Duration(pos * float64(time.Second))
+			p.posAt = time.Now()
 			p.mu.Unlock()
 		}
 		if dur, ok := p.getFloat("duration"); ok {
@@ -264,11 +271,19 @@ func (p *Player) Stop() {
 	p.mu.Unlock()
 }
 
-// State returns a snapshot.
+// State returns a snapshot, with the position carried forward from the last
+// reading so it advances smoothly between polls.
 func (p *Player) State() State {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.state
+	st := p.state
+	if st.Playing && !p.posAt.IsZero() {
+		st.Position += time.Since(p.posAt)
+		if st.Duration > 0 && st.Position > st.Duration {
+			st.Position = st.Duration
+		}
+	}
+	return st
 }
 
 // Close shuts mpv down and removes its socket.

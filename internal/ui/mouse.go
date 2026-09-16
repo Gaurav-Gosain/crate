@@ -110,5 +110,85 @@ func parseMouse(buf []byte) (ev mouseEvent, consumed int, ok bool, partial bool)
 	return ev, end + 1, true, false
 }
 
+// Synthetic key codes for keys that arrive as escape sequences. They sit
+// above the ASCII range so they cannot collide with a real byte.
+const (
+	keyUp byte = iota + 0x80
+	keyDown
+	keyRight
+	keyLeft
+	keyHome
+	keyEnd
+	keyPgUp
+	keyPgDn
+	keyDelete
+)
+
+// parseCSIKey reads one arrow or navigation key from the front of buf.
+//
+// These are needed because an overlay that filters as you type cannot also use
+// j and k to move: the letters have to go into the filter.
+func parseCSIKey(buf []byte) (key byte, n int, ok bool, partial bool) {
+	if len(buf) < 2 || buf[0] != 0x1b || buf[1] != '[' {
+		return 0, 0, false, false
+	}
+	if len(buf) < 3 {
+		return 0, 0, false, true
+	}
+	switch buf[2] {
+	case 'A':
+		return keyUp, 3, true, false
+	case 'B':
+		return keyDown, 3, true, false
+	case 'C':
+		return keyRight, 3, true, false
+	case 'D':
+		return keyLeft, 3, true, false
+	case 'H':
+		return keyHome, 3, true, false
+	case 'F':
+		return keyEnd, 3, true, false
+	}
+	// Sequences of the form ESC [ <digits> ~
+	if buf[2] >= '0' && buf[2] <= '9' {
+		for i := 3; i < len(buf); i++ {
+			if buf[i] == '~' {
+				switch string(buf[2:i]) {
+				case "3":
+					return keyDelete, i + 1, true, false
+				case "5":
+					return keyPgUp, i + 1, true, false
+				case "6":
+					return keyPgDn, i + 1, true, false
+				}
+				return 0, i + 1, false, false
+			}
+			if buf[i] < '0' || buf[i] > '9' {
+				return 0, 0, false, false
+			}
+		}
+		return 0, 0, false, true
+	}
+	return 0, 0, false, false
+}
+
+// skipAPC reports the length of an application programme command at the front
+// of buf, terminated by ESC backslash.
+//
+// Terminals answer graphics commands with one of these. Without skipping it
+// the reply is handed to the key handler a byte at a time, and the user finds
+// the terminal has typed "Gi=7101;OK" into whatever had focus.
+func skipAPC(buf []byte) (n int, partial bool) {
+	if len(buf) < 2 || buf[0] != 0x1b || buf[1] != '_' {
+		return 0, false
+	}
+	for i := 2; i < len(buf)-1; i++ {
+		if buf[i] == 0x1b && buf[i+1] == '\\' {
+			return i + 2, false
+		}
+	}
+	return 0, true
+}
+
 // itoa keeps the escape building free of fmt in the hot path.
 func itoa(n int) string { return strconv.Itoa(n) }

@@ -58,6 +58,7 @@ const (
 	modeList mode = iota
 	modeSearch
 	modePlay
+	modeOverlay
 )
 
 // App owns the terminal and all mutable view state.
@@ -106,6 +107,11 @@ type App struct {
 	hitListTop  int
 	hitProgress rect
 	hitSources  rect
+
+	// ov is the command palette or theme picker when one is open. prevMode
+	// is what to go back to when it closes.
+	ov       *overlayState
+	prevMode mode
 
 	redrawCh chan struct{}
 	quit     chan struct{}

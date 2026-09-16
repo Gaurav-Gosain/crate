@@ -36,18 +36,7 @@ func panel(b *strings.Builder, r rect, title string, focused bool) {
 
 	// Top edge, with the title inlaid.
 	moveTo(b, r.y, r.x)
-	b.WriteString(edge + "╭")
-	if title != "" {
-		t := truncate(title, r.w-6)
-		fmt.Fprintf(b, "─%s %s%s%s %s", reset, fg, t, reset, edge)
-		used := visibleWidth(t) + 4
-		if used < r.w-2 {
-			b.WriteString(strings.Repeat("─", r.w-2-used))
-		}
-	} else {
-		b.WriteString(strings.Repeat("─", r.w-2))
-	}
-	b.WriteString("╮" + reset)
+	b.WriteString(topEdge(r.w, title, edge))
 
 	// Sides.
 	for i := 1; i < r.h-1; i++ {
@@ -60,6 +49,33 @@ func panel(b *strings.Builder, r rect, title string, focused bool) {
 	// Bottom edge.
 	moveTo(b, r.y+r.h-1, r.x)
 	b.WriteString(edge + "╰" + strings.Repeat("─", r.w-2) + "╯" + reset)
+}
+
+// topEdge builds a panel's top border with the title inlaid.
+//
+// It is a separate function so its width can be asserted. The edge has to come
+// out exactly w cells wide: one column short and the corner sits inside the
+// right edge, which makes the box look crooked next to its neighbours.
+func topEdge(w int, title, edge string) string {
+	if w < 4 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(edge + "╭")
+	if title == "" {
+		b.WriteString(strings.Repeat("─", w-2))
+	} else {
+		t := truncate(title, w-6)
+		// Three cells go out before the fill: the leading rule and a space
+		// either side of the title.
+		used := visibleWidth(t) + 3
+		fmt.Fprintf(&b, "─%s %s%s%s %s", reset, fg, t, reset, edge)
+		if rest := w - 2 - used; rest > 0 {
+			b.WriteString(strings.Repeat("─", rest))
+		}
+	}
+	b.WriteString("╮" + reset)
+	return b.String()
 }
 
 // progress draws a slider: a filled track with a handle at the current point.

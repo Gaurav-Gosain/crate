@@ -36,6 +36,25 @@ func (a *App) readKeys() {
 		pending = append(pending, buf[:n]...)
 
 		for len(pending) > 0 {
+			if n, part := skipAPC(pending); part {
+				break
+			} else if n > 0 {
+				pending = pending[n:]
+				continue
+			}
+			if k, n, ok, part := parseCSIKey(pending); part {
+				break
+			} else if ok {
+				pending = pending[n:]
+				if a.handleKey(k) {
+					close(a.quit)
+					return
+				}
+				continue
+			} else if n > 0 {
+				pending = pending[n:]
+				continue
+			}
 			ev, consumed, ok, partial := parseMouse(pending)
 			if partial {
 				break // wait for the rest of it
@@ -76,6 +95,9 @@ func (a *App) handleKey(c byte) bool {
 	if m == modeSearch {
 		return a.handleSearchKey(c)
 	}
+	if m == modeOverlay {
+		return a.handleOverlayKey(c)
+	}
 	if m == modePlay {
 		return a.handlePlayKey(c)
 	}
@@ -106,6 +128,10 @@ func (a *App) handleKey(c byte) bool {
 		a.removeSelected()
 	case 'p':
 		a.enterPlay()
+	case 't':
+		a.openThemes()
+	case ':', 11: // ':' or ctrl-k
+		a.openPalette()
 	case 'r':
 		go a.scanOnly()
 	case '?':

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 )
@@ -24,11 +23,10 @@ var nextArtID atomic.Uint32
 
 // art is one decoded cover, ready to send.
 type art struct {
-	id      uint32
-	path    string
-	pathB64 string
-	px      int
-	sent    atomic.Bool
+	id   uint32
+	data string // the pixels, base64 encoded
+	px   int
+	sent atomic.Bool
 }
 
 // graphicsSupported reports whether the terminal understands the protocol.
@@ -67,7 +65,6 @@ func loadArt(ctx context.Context, src string, px int) (*art, error) {
 		px = 32
 	}
 	id := artImageIDBase + nextArtID.Add(1)
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("crate-art-%d-%d.rgb", os.Getpid(), id))
 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error",
@@ -77,41 +74,71 @@ func loadArt(ctx context.Context, src string, px int) (*art, error) {
 		"-vf", fmt.Sprintf("crop='min(iw,ih)':'min(iw,ih)',scale=%d:%d", px, px),
 		"-f", "rawvideo",
 		"-pix_fmt", "rgb24",
-		"-y", path,
+		"-",
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		os.Remove(path)
-		return nil, fmt.Errorf("no cover: %s", strings.TrimSpace(string(out)))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil || len(raw) == 0 {
+		return nil, fmt.Errorf("no cover: %s", strings.TrimSpace(stderr.String()))
 	}
-	fi, err := os.Stat(path)
-	if err != nil || fi.Size() == 0 {
-		os.Remove(path)
-		return nil, fmt.Errorf("no cover in this file")
+	if want := px * px * 3; len(raw) != want {
+		return nil, fmt.Errorf("cover is %d bytes, expected %d", len(raw), want)
 	}
 
 	return &art{
-		id:      id,
-		path:    path,
-		pathB64: base64.StdEncoding.EncodeToString([]byte(path)),
-		px:      px,
+		id:   id,
+		data: base64.StdEncoding.EncodeToString(raw),
+		px:   px,
 	}, nil
 }
 
+// chunkSize is the largest payload the protocol allows in one escape.
+const chunkSize = 4096
+
 // place returns the escape sequence drawing the cover at the cursor.
 //
-// The first call transmits the pixels and displays them; every later call only
-// places the image the terminal already holds. Transmitting each frame would
-// re-read the file and, worse, leave the terminal holding a new copy of the
-// image every time, which is how a picture viewer ends up using a gigabyte of
-// the terminal's memory in a minute.
+// The pixels are sent inline rather than by writing a temp file and handing
+// over its path. The file route needs the terminal to agree that the path is
+// somewhere it is willing to read, which depends on the terminal, the
+// platform's idea of a temporary directory, and whether the file survives long
+// enough to be read. Sending the bytes has none of those failure modes, and
+// they are only sent once.
+//
+// The first call transmits and displays; every later call only places the
+// image the terminal already holds. Transmitting every frame would leave the
+// terminal holding a fresh copy each time, which is how a picture viewer ends
+// up using a gigabyte of the terminal's memory in a minute.
 //
 // C=1 leaves the cursor alone so text can be drawn beside the image.
 func (a *art) place(cols, rows int) string {
-	if a.sent.CompareAndSwap(false, true) {
-		return fmt.Sprintf("\x1b_Ga=T,i=%d,t=t,f=24,s=%d,v=%d,c=%d,r=%d,C=1,q=2;%s\x1b\\",
-			a.id, a.px, a.px, cols, rows, a.pathB64)
+	if !a.sent.CompareAndSwap(false, true) {
+		return fmt.Sprintf("\x1b_Ga=p,i=%d,c=%d,r=%d,C=1,q=2;\x1b\\", a.id, cols, rows)
 	}
-	return fmt.Sprintf("\x1b_Ga=p,i=%d,c=%d,r=%d,C=1,q=2;\x1b\\", a.id, cols, rows)
+
+	var b strings.Builder
+	data := a.data
+	first := true
+	for len(data) > 0 {
+		n := chunkSize
+		if n > len(data) {
+			n = len(data)
+		}
+		part := data[:n]
+		data = data[n:]
+		more := 0
+		if len(data) > 0 {
+			more = 1
+		}
+		if first {
+			fmt.Fprintf(&b, "\x1b_Ga=T,i=%d,f=24,s=%d,v=%d,c=%d,r=%d,C=1,q=2,m=%d;%s\x1b\\",
+				a.id, a.px, a.px, cols, rows, more, part)
+			first = false
+			continue
+		}
+		fmt.Fprintf(&b, "\x1b_Gm=%d;%s\x1b\\", more, part)
+	}
+	return b.String()
 }
 
 // deleteCmd frees the image inside the terminal. d=I deletes by id and
@@ -120,10 +147,9 @@ func (a *art) deleteCmd() string {
 	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2;\x1b\\", a.id)
 }
 
-// cleanup removes the temp file. With t=t the terminal usually deletes it
-// after reading, but a cover that was fetched and never drawn still has one.
+// cleanup releases the encoded pixels. Nothing is written to disk, so there
+// is no file to remove; dropping the data keeps a long session from holding
+// on to every cover it has decoded.
 func (a *art) cleanup() {
-	if a.path != "" {
-		os.Remove(a.path)
-	}
+	a.data = ""
 }

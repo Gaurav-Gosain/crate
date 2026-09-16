@@ -40,6 +40,24 @@ func (a *App) draw() {
 
 	a.drawHeader(&b, w, rows, busy, searching, started)
 
+	if m == modeOverlay {
+		// The overlay floats over whatever was underneath, so that is drawn
+		// first and the panel put on top of it.
+		a.mu.Lock()
+		under := a.prevMode
+		a.mu.Unlock()
+		if under == modePlay {
+			a.drawPlay(&b, w, h)
+		} else {
+			a.drawMain(&b, w, h, rows, cursor, logs)
+		}
+		a.drawOverlay(&b, w, h)
+		a.drawFooter(&b, w, h, prompt, buf)
+		b.WriteString("\x1b[?2026l")
+		a.tty.WriteString(b.String())
+		return
+	}
+
 	if m == modePlay {
 		a.drawPlay(&b, w, h)
 		a.drawFooter(&b, w, h, prompt, buf)
@@ -56,6 +74,19 @@ func (a *App) draw() {
 		return
 	}
 
+	a.drawMain(&b, w, h, rows, cursor, logs)
+	a.drawFooter(&b, w, h, prompt, buf)
+
+	b.WriteString("\x1b[?2026l")
+	a.tty.WriteString(b.String())
+}
+
+// drawMain renders the sources list and the activity log, which is the view
+// the interface sits in when it is not playing or searching.
+//
+// It is a function rather than the tail of draw so the overlay can put itself
+// on top of it without the geometry being worked out twice.
+func (a *App) drawMain(b *strings.Builder, w, h int, rows []row, cursor int, logs []string) {
 	// Vertical budget. The list takes what it needs up to a third of the
 	// screen; activity takes the rest, so the pane that grows is the one
 	// with something to say.
@@ -67,19 +98,15 @@ func (a *App) draw() {
 	listMax := max((h-top-gapRows-bottom)/2, 3)
 	listRows := clamp(max(len(rows), 1), 1, listMax)
 
-	section(&b, 3, w, "sources", sourcesSummary(rows))
-	a.drawList(&b, w, 4, rows, cursor, listRows)
+	section(b, 3, w, "sources", sourcesSummary(rows))
+	a.drawList(b, w, 4, rows, cursor, listRows)
 
 	sep := 4 + listRows
-	moveTo(&b, sep, 1)
-	clearLine(&b)
-	fmt.Fprintf(&b, "%s%s%s", rule, strings.Repeat("─", w), reset)
+	moveTo(b, sep, 1)
+	clearLine(b)
+	fmt.Fprintf(b, "%s%s%s", rule, strings.Repeat("─", w), reset)
 
-	a.drawLogs(&b, w, h, sep+1, logs)
-	a.drawFooter(&b, w, h, prompt, buf)
-
-	b.WriteString("\x1b[?2026l")
-	a.tty.WriteString(b.String())
+	a.drawLogs(b, w, h, sep+1, logs)
 }
 
 // sourcesSummary is the right hand figure on the sources header: what the set
@@ -298,13 +325,13 @@ func (a *App) drawFooter(b *strings.Builder, w, h int, prompt, buf string) {
 	a.mu.Unlock()
 
 	keys := [][2]string{
-		{"/", "search"}, {"s", "sync"}, {"a", "add"},
-		{"d", "remove"}, {"r", "rescan"}, {"p", "play"}, {"q", "quit"},
+		{":", "commands"}, {"/", "search"}, {"s", "sync"}, {"a", "add"},
+		{"d", "remove"}, {"p", "play"}, {"t", "theme"}, {"q", "quit"},
 	}
 	if inPlay {
 		keys = [][2]string{
 			{"space", "pause"}, {"enter", "play"}, {"n/b", "next/prev"},
-			{"h/l", "seek"}, {"t", "theme"}, {"q", "back"},
+			{"h/l", "seek"}, {":", "commands"}, {"t", "theme"}, {"q", "back"},
 		}
 	}
 	var parts []string

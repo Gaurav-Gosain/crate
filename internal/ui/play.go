@@ -83,6 +83,7 @@ func (a *App) leavePlay() {
 func (a *App) animate() {
 	t := time.NewTicker(66 * time.Millisecond)
 	defer t.Stop()
+	slow := 0
 	for range t.C {
 		a.mu.Lock()
 		p := a.player
@@ -91,11 +92,15 @@ func (a *App) animate() {
 		if !inPlay || p == nil {
 			return
 		}
-		// Only redraw while the record is actually turning. A paused or
-		// stopped view is a still image, and repainting it fifteen times a
-		// second burns CPU and tears the frame for no benefit.
+		// The record only needs full frame rate while it is turning. Paused,
+		// the view is nearly still, but not entirely: the selected title
+		// scrolls if it does not fit, so a slower beat keeps that moving
+		// without repainting a static screen fifteen times a second.
 		if !p.State().Playing {
-			continue
+			slow++
+			if slow%3 != 0 {
+				continue
+			}
 		}
 		a.redraw()
 	}
@@ -149,7 +154,7 @@ func (a *App) playSelected() {
 	go func() {
 		actx, acancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer acancel()
-		art, err := loadArt(actx, src, 480)
+		art, err := loadArt(actx, src, 320)
 		if err != nil {
 			// A missing cover is ordinary: plenty of files have none, and the
 			// record is drawn instead. It is not worth a line in the log.
@@ -216,13 +221,9 @@ func (a *App) handlePlayKey(c byte) bool {
 			p.Seek(-5 * time.Second)
 		}
 	case 't':
-		name := theme.Next()
-		applyTheme()
-		a.cfg.Theme = name
-		if err := a.cfg.Save(); err != nil {
-			a.logf("could not remember the theme: %v", err)
-		}
-		a.logf("theme: %s", name)
+		a.openThemes()
+	case ':', 11: // ':' or ctrl-k
+		a.openPalette()
 	}
 	a.redraw()
 	return false
@@ -344,6 +345,11 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 			mark = "▸ "
 		}
 		label := truncate(s.Title, r.w-2)
+		if start+i == cursor {
+			// The selected row scrolls when its title does not fit, so a long
+			// name can still be read without widening the panel.
+			label = marquee(s.Title, r.w-2, time.Now())
+		}
 		switch {
 		case start+i == cursor:
 			// Selected rows are filled rather than merely coloured. Colour
@@ -468,6 +474,8 @@ func (a *App) handleMouse(ev mouseEvent) bool {
 	a.mu.Unlock()
 
 	switch m {
+	case modeOverlay:
+		a.handleOverlayMouse(ev)
 	case modePlay:
 		switch ev.kind {
 		case mouseWheelUp:

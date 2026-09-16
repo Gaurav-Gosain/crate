@@ -106,6 +106,16 @@ func Set(name string) error {
 	return fmt.Errorf("unknown theme %q (have: %s)", name, strings.Join(Names(), ", "))
 }
 
+// Get looks up a theme by name, for listing swatches without selecting it.
+func Get(name string) (Theme, bool) {
+	for _, t := range builtin {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return Theme{}, false
+}
+
 // Current returns the active theme.
 func Current() Theme {
 	mu.RLock()
