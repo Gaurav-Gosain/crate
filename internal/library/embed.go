@@ -1,134 +1,128 @@
 package library
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
+	"github.com/Gaurav-Gosain/crate/internal/oggtag"
 )
 
-// EmbedLyrics writes timed words into the files themselves, on the server.
+// EmbedLyrics writes timed words into the tracks themselves.
 //
-// Putting them in the track rather than in a file beside it is what makes a
-// music server show them. Navidrome reads an external .lrc only when told to,
-// and its own interface does not read one at all, so lyrics kept alongside
-// the audio are invisible on a phone and in a browser. Embedded, they travel
-// with the music and every client sees them.
-//
-// The tagging runs on the server rather than here. The files live there and
-// nowhere else, so the alternative is fetching each one, rewriting it and
-// sending it back, which moves the whole library twice to change a few
-// hundred bytes in each file.
+// Into the file rather than into one beside it, because a music server reads
+// an external lyrics file only when told to and its own interface does not
+// read one at all, so words kept alongside the audio are invisible on a phone
+// and in a browser. Embedded, they travel with the music.
 func EmbedLyrics(ctx context.Context, c *config.Config, words map[string]string, log func(string, ...any)) (int, error) {
-	return embedTag(ctx, c, "lyrics", words, log)
+	return embedTag(ctx, c, "LYRICS", words, log)
 }
 
-// EmbedIDs writes the video each track came from into the track.
+// EmbedIDs writes the video a track came from into the track.
 //
-// Tracks downloaded before crate started recording this carry only a title,
-// and a title is not enough to find the captions for a particular upload.
+// Without it a track is only a title, and a title is not enough to find the
+// captions for one particular upload.
 func EmbedIDs(ctx context.Context, c *config.Config, ids map[string]string, log func(string, ...any)) (int, error) {
 	return embedTag(ctx, c, "youtube_id", ids, log)
 }
 
-func embedTag(ctx context.Context, c *config.Config, tag string, words map[string]string, log func(string, ...any)) (int, error) {
-	if len(words) == 0 {
+// embedTag applies one tag to many tracks.
+//
+// Each file is fetched, edited here, and sent back. The tagging deliberately
+// does not run on the server: doing it there meant a python tag editor
+// installed alongside the music, and the point of this program is to be one
+// binary and the tools a music library already needs. The cost is that a file
+// crosses the wire twice to change a few hundred bytes in it, which is worth
+// paying for a backfill that happens once. Tracks downloaded from now on are
+// tagged before they are ever mirrored, so they never pay it at all.
+func embedTag(ctx context.Context, c *config.Config, tag string, values map[string]string, log func(string, ...any)) (int, error) {
+	if len(values) == 0 {
 		return 0, nil
 	}
 	if c.Remote.Host == "" || c.Remote.Path == "" {
 		return 0, fmt.Errorf("no remote configured: set remote.host and remote.path in %s", config.Path())
 	}
 
-	// Stage the words locally, one file per track, laid out under the same
-	// relative paths so the server can pair them up without being told.
-	dir, err := os.MkdirTemp("", "crate-lyrics-")
+	dir, err := os.MkdirTemp("", "crate-tag-")
 	if err != nil {
 		return 0, err
 	}
 	defer os.RemoveAll(dir)
 
-	for rel, lrc := range words {
-		dst := filepath.Join(dir, rel+".lrc")
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return 0, err
-		}
-		if err := os.WriteFile(dst, []byte(lrc), 0o644); err != nil {
-			return 0, err
-		}
-	}
-
-	stage := "/tmp/crate-tag-stage"
+	root := strings.TrimSuffix(c.Remote.Path, "/")
 	rsh := "ssh -o BatchMode=yes"
-	if out, err := exec.CommandContext(ctx, "rsync",
-		"-rlt", "--delete", "--no-perms", "--no-owner", "--no-group",
-		"--timeout", "120", "-e", rsh,
-		strings.TrimSuffix(dir, "/")+"/", c.Remote.Host+":"+stage+"/",
-	).CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("send lyrics: %s", strings.TrimSpace(string(out)))
-	}
 
-	// Built by substitution rather than by Sprintf: the script is Python and
-	// uses percent formatting of its own, which Sprintf would try to read as
-	// its verbs and mangle.
-	script := strings.NewReplacer(
-		"__STAGE__", stage,
-		"__ROOT__", strings.TrimSuffix(c.Remote.Path, "/"),
-		"__TAG__", tag,
-	).Replace(embedScript)
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", c.Remote.Host, "sudo python3 -")
-	cmd.Stdin = strings.NewReader(script)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("embed lyrics: %s", strings.TrimSpace(out.String()))
-	}
+	var (
+		mu   sync.Mutex
+		done int
+		wg   sync.WaitGroup
+		// Four at a time: each one is a file over the network in both
+		// directions, so more would only queue on the same link.
+		sem = make(chan struct{}, 4)
+	)
+	for rel, value := range values {
+		wg.Add(1)
+		go func(rel, value string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
 
-	done := 0
-	for _, line := range strings.Split(out.String(), "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "embedded ") {
-			fmt.Sscanf(line, "embedded %d", &done)
-		} else if line != "" && log != nil {
-			log("   %s", line)
-		}
+			local := filepath.Join(dir, filepath.Base(rel))
+			remote := c.Remote.Host + ":" + root + "/" + rel
+
+			if out, err := exec.CommandContext(ctx, "rsync", "-t", "--timeout", "120",
+				"-e", rsh, remote, local).CombinedOutput(); err != nil {
+				if log != nil {
+					log("could not fetch %s: %s", short(rel), strings.TrimSpace(string(out)))
+				}
+				return
+			}
+			defer os.Remove(local)
+
+			if err := oggtag.Set(local, tag, value); err != nil {
+				if log != nil {
+					log("could not tag %s: %v", short(rel), err)
+				}
+				return
+			}
+
+			// --inplace so the server rewrites the file it already has rather
+			// than building a copy beside it, which would need room for a
+			// second library on a disk that does not have it.
+			if out, err := exec.CommandContext(ctx, "rsync", "-t", "--inplace",
+				"--no-perms", "--no-owner", "--no-group", "--timeout", "120",
+				"-e", rsh, local, remote).CombinedOutput(); err != nil {
+				if log != nil {
+					log("could not send %s back: %s", short(rel), strings.TrimSpace(string(out)))
+				}
+				return
+			}
+
+			mu.Lock()
+			done++
+			n := done
+			mu.Unlock()
+			if log != nil && n%50 == 0 {
+				log("tagged %d so far", n)
+			}
+		}(rel, value)
 	}
+	wg.Wait()
 	return done, nil
 }
 
-// embedScript pairs each staged .lrc with its track and writes it into the
-// tags. mutagen edits the tags in place, which matters: rewriting an opus
-// file through ffmpeg would drop the cover art, because an ogg container
-// cannot carry the picture stream back out again.
-const embedScript = `
-import os, sys
-from mutagen import File
-
-stage = "__STAGE__"
-root = "__ROOT__"
-done = 0
-for dirpath, _, names in os.walk(stage):
-    for n in names:
-        if not n.endswith(".lrc"):
-            continue
-        lrc = os.path.join(dirpath, n)
-        rel = os.path.relpath(lrc, stage)[: -len(".lrc")]
-        track = os.path.join(root, rel)
-        if not os.path.exists(track):
-            print("missing on the server: " + rel[:70])
-            continue
-        try:
-            words = open(lrc, encoding="utf-8").read()
-            au = File(track)
-            if au is None:
-                continue
-            au["__TAG__"] = [words]
-            au.save()
-            done += 1
-        except Exception as e:
-            print("could not tag %s: %s" % (rel[:50], e))
-print("embedded %d" % done)
-`
+func short(s string) string {
+	r := []rune(s)
+	if len(r) <= 48 {
+		return string(r)
+	}
+	return string(r[:47]) + "…"
+}
