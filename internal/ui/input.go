@@ -22,18 +22,42 @@ func (a *App) watchResize() {
 }
 
 func (a *App) readKeys() {
-	buf := make([]byte, 64)
+	buf := make([]byte, 256)
+	// pending holds bytes that arrived mid sequence. A mouse report split
+	// across two reads must not be handed to the key handler, or its tail is
+	// typed into whatever has focus.
+	var pending []byte
 	for {
 		n, err := a.tty.Read(buf)
 		if err != nil || n == 0 {
 			close(a.quit)
 			return
 		}
-		for i := 0; i < n; i++ {
-			if a.handleKey(buf[i]) {
+		pending = append(pending, buf[:n]...)
+
+		for len(pending) > 0 {
+			ev, consumed, ok, partial := parseMouse(pending)
+			if partial {
+				break // wait for the rest of it
+			}
+			if ok {
+				pending = pending[consumed:]
+				if a.handleMouse(ev) {
+					close(a.quit)
+					return
+				}
+				continue
+			}
+			if consumed > 0 {
+				// A malformed report: drop it rather than typing it.
+				pending = pending[consumed:]
+				continue
+			}
+			if a.handleKey(pending[0]) {
 				close(a.quit)
 				return
 			}
+			pending = pending[1:]
 		}
 		a.redraw()
 	}

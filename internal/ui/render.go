@@ -45,6 +45,32 @@ func moveTo(b *strings.Builder, row, col int) {
 
 func clearLine(b *strings.Builder) { b.WriteString("\x1b[2K") }
 
+// runeWidth reports how many cells a rune occupies.
+//
+// Counting runes is not the same as counting cells. These filenames are full
+// of characters like "｜", the fullwidth vertical line yt-dlp substitutes for
+// a pipe, and every one of them takes two columns. Measured as one, a list
+// entry that was trimmed to fit still runs past the edge of its panel and
+// over the border.
+func runeWidth(r rune) int {
+	switch {
+	case r < 0x1100:
+		return 1
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0xA4CF, // CJK radicals through Yi
+		r >= 0xAC00 && r <= 0xD7A3, // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF, // CJK compatibility ideographs
+		r >= 0xFE30 && r <= 0xFE6F, // CJK compatibility forms
+		r >= 0xFF00 && r <= 0xFF60, // fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,
+		r >= 0x1F300 && r <= 0x1F64F, // emoji
+		r >= 0x1F900 && r <= 0x1F9FF,
+		r >= 0x20000 && r <= 0x3FFFD:
+		return 2
+	}
+	return 1
+}
+
 // visibleWidth counts display cells, skipping ANSI escape sequences.
 //
 // Measuring len() or rune count on a styled string counts "\x1b[1m" as four
@@ -57,9 +83,9 @@ func visibleWidth(s string) int {
 			i += escapeLen(s[i:])
 			continue
 		}
-		_, size := utf8.DecodeRuneInString(s[i:])
+		r, size := utf8.DecodeRuneInString(s[i:])
 		i += size
-		n++
+		n += runeWidth(r)
 	}
 	return n
 }
@@ -119,13 +145,16 @@ func truncate(s string, w int) string {
 			i += l
 			continue
 		}
-		if n >= limit {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		// Check before writing: a two cell rune written when only one cell is
+		// left still overflows, which is how a trimmed line runs over the
+		// border it was trimmed to fit inside.
+		if n+runeWidth(r) > limit {
 			break
 		}
-		r, size := utf8.DecodeRuneInString(s[i:])
 		b.WriteRune(r)
 		i += size
-		n++
+		n += runeWidth(r)
 	}
 	if w > 1 {
 		b.WriteString("…")

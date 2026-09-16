@@ -134,6 +134,24 @@ func Fg(hex string) string {
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
+// Bg returns the escape sequence setting the background to a hex colour,
+// for a selected row that should read as a filled bar rather than as merely
+// differently coloured text.
+func Bg(hex string) string {
+	r, g, b := rgb(hex)
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+}
+
+// Ink returns a foreground that stays readable on the given background,
+// chosen by the background's brightness rather than assumed.
+func Ink(hex string) string {
+	r, g, b := rgb(hex)
+	if (r*299+g*587+b*114)/1000 > 140 {
+		return "\x1b[38;2;16;16;20m"
+	}
+	return "\x1b[38;2;240;240;245m"
+}
+
 // SpectrumAt samples the spectrum gradient at p in [0,1], interpolating
 // between the two nearest stops so a tall bar shades smoothly rather than
 // stepping between a handful of colours.

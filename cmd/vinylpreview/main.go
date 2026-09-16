@@ -1,34 +1,58 @@
-// Command vinylpreview prints a single frame of the record, for looking at it
-// without the interface redrawing underneath the capture.
+// Command vinylpreview draws one frame of the record and the visualiser, for
+// looking at them without the interface repainting underneath the capture.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
+	"github.com/Gaurav-Gosain/crate/internal/player"
 	"github.com/Gaurav-Gosain/crate/internal/theme"
 	"github.com/Gaurav-Gosain/crate/internal/ui"
 )
 
 func main() {
-	rot := 0.8
+	src := ""
 	if len(os.Args) > 1 {
-		if v, err := strconv.ParseFloat(os.Args[1], 64); err == nil {
-			rot = v
-		}
+		src = os.Args[1]
 	}
+	at := 30.0
 	if len(os.Args) > 2 {
-		theme.Set(os.Args[2])
+		at, _ = strconv.ParseFloat(os.Args[2], 64)
 	}
-	for _, line := range ui.VinylPreview(40, 20, rot, theme.Current()) {
+	if len(os.Args) > 3 {
+		theme.Set(os.Args[3])
+	}
+	t := theme.Current()
+
+	for _, line := range ui.VinylPreview(34, 17, 0.8, t) {
 		fmt.Println(line)
 	}
-	bars := make([]float64, 60)
-	for i := range bars {
-		bars[i] = 0.25 + 0.7*float64((i*37)%11)/11
+	fmt.Println()
+
+	if src == "" {
+		return
 	}
-	for _, line := range ui.BarsPreview(bars, 8, theme.Current()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	sp := player.Analyse(ctx, src)
+	for i := 0; i < 200 && !sp.Ready(); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := sp.Err(); err != nil {
+		fmt.Println("decode:", err)
+		return
+	}
+	pos := time.Duration(at * float64(time.Second))
+	// Advance a few frames so the smoothing settles, as it would in use.
+	var vals, peaks []float64
+	for i := 0; i < 20; i++ {
+		vals, peaks = sp.BarsWithPeaks(pos+time.Duration(i)*40*time.Millisecond, ui.BarCount(100))
+	}
+	for _, line := range ui.BarsPreview(vals, peaks, 12, t) {
 		fmt.Println(line)
 	}
 }

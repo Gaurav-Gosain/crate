@@ -247,6 +247,15 @@ func (p *Player) Seek(d time.Duration) {
 	p.command("seek", d.Seconds(), "relative")
 }
 
+// SeekTo jumps to an absolute position, which is what clicking or dragging a
+// progress bar means.
+func (p *Player) SeekTo(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	p.command("seek", d.Seconds(), "absolute")
+}
+
 // Stop halts playback but leaves mpv running for the next track.
 func (p *Player) Stop() {
 	p.command("stop")

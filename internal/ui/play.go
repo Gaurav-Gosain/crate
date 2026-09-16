@@ -61,10 +61,16 @@ func (a *App) enterPlay() {
 func (a *App) leavePlay() {
 	a.mu.Lock()
 	p := a.player
+	cover := a.cover
 	a.player = nil
 	a.spectrum = nil
+	a.cover, a.coverFor = nil, ""
 	a.mode = modeList
 	a.mu.Unlock()
+	if cover != nil {
+		a.tty.WriteString(cover.deleteCmd())
+		cover.cleanup()
+	}
 	if p != nil {
 		p.Close()
 	}
@@ -125,7 +131,42 @@ func (a *App) playSelected() {
 		a.spectrumStop()
 	}
 	a.spectrum, a.spectrumStop, a.nowPlaying = sp, cancel, song
+	old := a.cover
+	a.cover, a.coverFor = nil, song.Rel
 	a.mu.Unlock()
+
+	// Release the previous cover inside the terminal. Without this the
+	// terminal keeps every image it has ever been sent, and a long listening
+	// session quietly grows its memory by a cover a track.
+	if old != nil {
+		a.tty.WriteString(old.deleteCmd())
+		old.cleanup()
+	}
+
+	if !graphicsSupported() {
+		return
+	}
+	go func() {
+		actx, acancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer acancel()
+		art, err := loadArt(actx, src, 480)
+		if err != nil {
+			// A missing cover is ordinary: plenty of files have none, and the
+			// record is drawn instead. It is not worth a line in the log.
+			return
+		}
+		a.mu.Lock()
+		stale := a.coverFor != song.Rel
+		if !stale {
+			a.cover = art
+		}
+		a.mu.Unlock()
+		if stale {
+			art.cleanup()
+			return
+		}
+		a.redraw()
+	}()
 }
 
 // playStep moves to the next or previous track and plays it.
@@ -211,11 +252,17 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	p := a.player
 	sp := a.spectrum
 	now := a.nowPlaying
+	cover := a.cover
 	a.mu.Unlock()
 
 	top := 3
+	contentH := h - top - 1
+	if contentH < 8 {
+		return
+	}
+
 	if loading {
-		moveTo(b, top+2, 4)
+		moveTo(b, top+1, 4)
 		fmt.Fprintf(b, "%sopening the record player...%s", muted, reset)
 		return
 	}
@@ -225,151 +272,244 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 		st = p.State()
 	}
 
-	// The list takes the left third, the record and bars the rest.
 	listW := w / 3
-	if listW < 24 {
-		listW = 24
+	if listW < 26 {
+		listW = 26
 	}
-	if listW > 46 {
-		listW = 46
-	}
-	rightX := listW + 3
-	rightW := w - rightX - 1
-	if rightW < 10 {
-		rightW = 10
+	if listW > 44 {
+		listW = 44
 	}
 
-	a.drawPlayList(b, songs, cursor, now, top, listW, h-top-4)
-	a.drawStage(b, st, sp, top, rightX, rightW, h-top-5)
-	a.drawNowPlaying(b, st, now, h, w)
+	listBox := rect{1, top, listW, contentH}
+	rightX := listW + 2
+	rightW := w - listW - 2
+	if rightW < 20 {
+		rightW = 20
+	}
+
+	nowH := contentH * 3 / 5
+	if nowH < 7 {
+		nowH = 7
+	}
+	specH := contentH - nowH
+	if specH < 4 {
+		specH = 4
+		nowH = contentH - specH
+	}
+
+	nowBox := rect{rightX, top, rightW, nowH}
+	specBox := rect{rightX, top + nowH, rightW, specH}
+
+	panel(b, listBox, fmt.Sprintf("library  %d", len(songs)), true)
+	panel(b, nowBox, "now playing", false)
+	panel(b, specBox, "", false)
+
+	a.drawPlayList(b, songs, cursor, now, listBox.inner())
+	a.drawNowPanel(b, st, now, cover, nowBox.inner())
+	a.drawSpectrum(b, st, sp, specBox.inner())
 }
 
 // drawPlayList shows the library with the playing track marked.
-func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int, now library.Song, top, w, rows int) {
-	if rows < 1 {
+func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int, now library.Song, r rect) {
+	if r.h < 1 {
 		return
 	}
-	moveTo(b, top-1, 2)
-	fmt.Fprintf(b, "%slibrary%s %s%d%s", muted, reset, dim, len(songs), reset)
-
 	if len(songs) == 0 {
-		moveTo(b, top+1, 2)
+		moveTo(b, r.y, r.x+1)
 		fmt.Fprintf(b, "%snothing here yet%s", muted, reset)
 		return
 	}
 
-	// Keep the cursor in view without jumping the list around more than it
-	// needs to.
-	start := cursor - rows/2
+	start := cursor - r.h/2
 	if start < 0 {
 		start = 0
 	}
-	if start+rows > len(songs) {
-		start = len(songs) - rows
+	if start+r.h > len(songs) {
+		start = len(songs) - r.h
 	}
 	if start < 0 {
 		start = 0
 	}
 
-	for i := 0; i < rows && start+i < len(songs); i++ {
+	a.mu.Lock()
+	a.hitList, a.hitListTop = r, start
+	a.mu.Unlock()
+
+	for i := 0; i < r.h && start+i < len(songs); i++ {
 		s := songs[start+i]
-		moveTo(b, top+i, 2)
-		mark := " "
-		style := ""
-		if s.Rel == now.Rel && now.Rel != "" {
-			mark, style = "▸", accent
+		moveTo(b, r.y+i, r.x)
+		playing := s.Rel == now.Rel && now.Rel != ""
+		mark := "  "
+		if playing {
+			mark = "▸ "
 		}
-		if start+i == cursor {
-			fmt.Fprintf(b, "%s%s %s%s", accent, mark, truncate(s.Title, w-2), reset)
-		} else {
-			fmt.Fprintf(b, "%s%s%s %s%s%s", style, mark, reset, style, truncate(s.Title, w-2), reset)
+		label := truncate(s.Title, r.w-2)
+		switch {
+		case start+i == cursor:
+			// Selected rows are filled rather than merely coloured. Colour
+			// alone is ambiguous next to the playing row, which is also
+			// coloured, and the two are often the same row.
+			t := theme.Current()
+			fmt.Fprintf(b, "%s%s%s%s%s%s", theme.Bg(t.Accent), theme.Ink(t.Accent), mark, label,
+				strings.Repeat(" ", max(0, r.w-2-visibleWidth(label))), reset)
+		case playing:
+			fmt.Fprintf(b, "%s%s%s%s", accent, mark, label, reset)
+		default:
+			fmt.Fprintf(b, "%s%s%s%s", muted, mark, label, reset)
 		}
 	}
 }
 
-// drawStage draws the record and the visualiser.
-func (a *App) drawStage(b *strings.Builder, st player.State, sp *player.Spectrum, top, x, w, rows int) {
-	if rows < 6 || w < 12 {
+// drawNowPanel draws the cover, the track details and the progress bar.
+func (a *App) drawNowPanel(b *strings.Builder, st player.State, now library.Song, cover *art, r rect) {
+	if r.h < 5 || r.w < 16 {
 		return
 	}
-	t := theme.Current()
 
-	barRows := rows / 3
-	if barRows < 3 {
-		barRows = 3
+	// The artwork is square, and terminal cells are about twice as tall as
+	// they are wide, so a square needs twice as many columns as rows.
+	artRows := r.h - 2
+	if artRows > 14 {
+		artRows = 14
 	}
-	if barRows > 10 {
-		barRows = 10
-	}
-	discRows := rows - barRows - 1
-	if discRows < 3 {
-		discRows = 3
+	artCols := artRows * 2
+	if artCols > r.w/2 {
+		artCols = r.w / 2
+		artRows = artCols / 2
 	}
 
-	// One full turn every two seconds, like a record at roughly 33rpm sped up
-	// enough to read as spinning on a terminal's refresh.
-	rot := 0.0
-	if st.Playing {
-		rot = float64(time.Now().UnixMilli()%2000) / 2000 * 2 * math.Pi
+	// Centre the artwork in the space above the transport rather than
+	// pinning it to the top, which left the panel looking half empty.
+	artY := r.y + max(0, (r.h-1-artRows)/2)
+
+	if cover != nil {
+		moveTo(b, artY, r.x)
+		b.WriteString(cover.place(artCols, artRows))
 	} else {
-		rot = float64(st.Position.Milliseconds()%2000) / 2000 * 2 * math.Pi
-	}
-
-	discW := discRows * 2
-	if discW > w {
-		discW = w
-	}
-	disc := vinyl(discW, discRows, rot, t)
-	offset := x + (w-discW)/2
-	for i, line := range disc {
-		moveTo(b, top+i, offset)
-		b.WriteString(line)
-	}
-
-	if sp != nil {
-		vals := sp.Bars(st.Position, w)
-		bars := spectrumBars(vals, barRows, t)
-		for i, line := range bars {
-			moveTo(b, top+discRows+1+i, x)
+		// No cover, or a terminal that cannot show one: spin a record instead.
+		rot := float64(time.Now().UnixMilli()%2600) / 2600 * 2 * math.Pi
+		if !st.Playing {
+			rot = float64(st.Position.Milliseconds()%2600) / 2600 * 2 * math.Pi
+		}
+		for i, line := range vinyl(artCols, artRows, rot, theme.Current()) {
+			moveTo(b, artY+i, r.x)
 			b.WriteString(line)
 		}
 	}
-}
 
-// drawNowPlaying is the title, times and progress bar along the bottom.
-func (a *App) drawNowPlaying(b *strings.Builder, st player.State, now library.Song, h, w int) {
-	row := h - 3
-	moveTo(b, row, 2)
-	if now.Rel == "" {
-		fmt.Fprintf(b, "%sselect a track and press enter%s", muted, reset)
-	} else {
-		icon := "❚❚"
-		if st.Playing {
-			icon = "▶"
+	tx := r.x + artCols + 3
+	tw := r.x + r.w - tx
+	if tw > 4 {
+		// The details sit level with the middle of the artwork.
+		ty := artY + max(0, artRows/2-1)
+		if now.Rel == "" {
+			moveTo(b, ty, tx)
+			fmt.Fprintf(b, "%sselect a track and press enter%s", muted, reset)
+		} else {
+			moveTo(b, ty, tx)
+			fmt.Fprintf(b, "%s%s%s%s", bold, fg, truncate(now.Title, tw), reset)
+			moveTo(b, ty+1, tx)
+			fmt.Fprintf(b, "%s%s%s", accent, truncate(now.Artist, tw), reset)
+			if now.Album != "" {
+				moveTo(b, ty+2, tx)
+				fmt.Fprintf(b, "%s%s%s", muted, truncate(now.Album, tw), reset)
+			}
 		}
-		title := now.Title
-		sub := now.Artist
-		if now.Album != "" {
-			sub += " · " + now.Album
-		}
-		fmt.Fprintf(b, "%s%s%s %s%s%s  %s%s%s",
-			accent, icon, reset,
-			bold, truncate(title, w/2), reset,
-			muted, truncate(sub, w/3), reset)
 	}
 
-	moveTo(b, row+1, 2)
+	// Transport, along the bottom of the panel.
+	row := r.y + r.h - 1
+	icon := "▶"
+	if st.Playing {
+		icon = "❚❚"
+	}
+	moveTo(b, row, r.x)
+	fmt.Fprintf(b, "%s%s%s ", accent, icon, reset)
+
+	times := fmt.Sprintf(" %s / %s", clock(st.Position), clock(st.Duration))
+	barW := r.w - visibleWidth(times) - 4
+	if barW < 6 {
+		barW = 6
+	}
 	pct := 0.0
 	if st.Duration > 0 {
 		pct = st.Position.Seconds() / st.Duration.Seconds()
 	}
-	width := w - 22
-	if width < 10 {
-		width = 10
+	moveTo(b, row, r.x+3)
+	b.WriteString(progress(pct, barW))
+	fmt.Fprintf(b, "%s%s%s", muted, times, reset)
+
+	a.mu.Lock()
+	a.hitProgress = rect{r.x + 3, row, barW, 1}
+	a.mu.Unlock()
+}
+
+// drawSpectrum draws the visualiser.
+func (a *App) drawSpectrum(b *strings.Builder, st player.State, sp *player.Spectrum, r rect) {
+	if r.h < 2 || r.w < 8 || sp == nil {
+		return
 	}
-	fmt.Fprintf(b, "%s%s%s %s%s / %s%s",
-		accent, bar(pct*100, width), reset,
-		muted, clock(st.Position), clock(st.Duration), reset)
+	vals, peaks := sp.BarsWithPeaks(st.Position, BarCount(r.w))
+	for i, line := range spectrumBars(vals, peaks, r.h, theme.Current()) {
+		moveTo(b, r.y+i, r.x)
+		b.WriteString(line)
+	}
+}
+
+// handleMouse acts on a click, drag or scroll.
+func (a *App) handleMouse(ev mouseEvent) bool {
+	a.mu.Lock()
+	m := a.mode
+	list, top := a.hitList, a.hitListTop
+	prog := a.hitProgress
+	sources := a.hitSources
+	p := a.player
+	n := len(a.songs)
+	a.mu.Unlock()
+
+	switch m {
+	case modePlay:
+		switch ev.kind {
+		case mouseWheelUp:
+			a.movePlayCursor(-3, n)
+		case mouseWheelDown:
+			a.movePlayCursor(3, n)
+		case mousePress, mouseDrag:
+			if prog.w > 0 && prog.contains(ev.x, ev.y) && p != nil {
+				st := p.State()
+				if st.Duration > 0 {
+					f := float64(ev.x-prog.x) / float64(prog.w-1)
+					p.SeekTo(time.Duration(f * float64(st.Duration)))
+				}
+				break
+			}
+			if ev.kind == mousePress && list.contains(ev.x, ev.y) {
+				idx := top + (ev.y - list.y)
+				a.mu.Lock()
+				if idx >= 0 && idx < len(a.songs) {
+					a.playCursor = idx
+				}
+				a.mu.Unlock()
+				go a.playSelected()
+			}
+		}
+	case modeList:
+		switch ev.kind {
+		case mouseWheelUp:
+			a.moveCursor(-3)
+		case mouseWheelDown:
+			a.moveCursor(3)
+		case mousePress:
+			if sources.contains(ev.x, ev.y) {
+				a.mu.Lock()
+				top := a.hitListTop
+				a.mu.Unlock()
+				a.setCursor(top + (ev.y - sources.y))
+			}
+		}
+	}
+	a.redraw()
+	return false
 }
 
 // clock formats a duration as m:ss, which is how long a song is.

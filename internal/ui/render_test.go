@@ -48,3 +48,34 @@ func TestPadCountsVisibleCells(t *testing.T) {
 		t.Errorf("pad gave %d visible cells, want 6: %q", visibleWidth(got), got)
 	}
 }
+
+// yt-dlp replaces characters a filesystem will not take, and its substitutes
+// are fullwidth: "｜" occupies two columns. Counted as one, a line trimmed to
+// fit a panel still runs over the border.
+func TestVisibleWidthCountsFullwidthAsTwo(t *testing.T) {
+	if got := visibleWidth("｜"); got != 2 {
+		t.Fatalf("fullwidth bar measured %d cells, want 2", got)
+	}
+	if got := visibleWidth("ab"); got != 2 {
+		t.Fatalf("two ascii letters measured %d", got)
+	}
+}
+
+func TestTruncateRespectsCellWidth(t *testing.T) {
+	s := "aa｜｜bb"
+	for _, w := range []int{3, 4, 5, 6, 7} {
+		got := truncate(s, w)
+		if visibleWidth(got) > w {
+			t.Fatalf("truncate(%q, %d) = %q, %d cells wide", s, w, got, visibleWidth(got))
+		}
+	}
+}
+
+func TestTruncateNeverSplitsAWideRune(t *testing.T) {
+	// Trimming to an odd width in the middle of a wide rune must drop it
+	// rather than emit half of it.
+	got := truncate("a｜b", 2)
+	if visibleWidth(got) > 2 {
+		t.Fatalf("got %q at %d cells", got, visibleWidth(got))
+	}
+}

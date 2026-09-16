@@ -171,6 +171,14 @@ func (a *App) drawList(b *strings.Builder, w, first int, rows []row, cursor, vis
 		start = cursor - visible + 1
 	}
 
+	// Record where the rows landed so a click can be turned back into a row
+	// without redoing this arithmetic somewhere else and keeping the two in
+	// step by hand.
+	a.mu.Lock()
+	a.hitSources = rect{1, first, w, visible}
+	a.hitListTop = start
+	a.mu.Unlock()
+
 	nameW := clamp(w/3, 14, 32)
 
 	for i := 0; i < visible && start+i < len(rows); i++ {

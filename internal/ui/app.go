@@ -96,6 +96,16 @@ type App struct {
 	nowPlaying   library.Song
 	spectrum     *player.Spectrum
 	spectrumStop context.CancelFunc
+	cover        *art
+	coverFor     string
+
+	// Regions the mouse can act on, recorded as the frame is drawn. Working
+	// them out again on a click would mean duplicating the layout arithmetic
+	// and keeping the two copies in step.
+	hitList     rect
+	hitListTop  int
+	hitProgress rect
+	hitSources  rect
 
 	redrawCh chan struct{}
 	quit     chan struct{}
@@ -157,8 +167,8 @@ func (a *App) Run() error {
 	defer term.Restore(a.fd, old)
 
 	// Alternate screen, cursor hidden. Restored on every exit path.
-	tty.WriteString("\x1b[?1049h\x1b[?25l")
-	defer tty.WriteString("\x1b[?25h\x1b[?1049l")
+	tty.WriteString("\x1b[?1049h\x1b[?25l" + enableMouse)
+	defer tty.WriteString(disableMouse + "\x1b[?25h\x1b[?1049l")
 
 	go a.readKeys()
 

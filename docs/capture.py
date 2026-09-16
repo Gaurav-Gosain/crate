@@ -24,7 +24,26 @@ stream = pyte.ByteStream(screen)
 
 deadline = time.time() + SECS
 sent = False
-while time.time() < deadline:
+# A "~" in the key string waits a second before the next key. Some views need
+# time to load before the next keystroke means anything: pressing enter before
+# the library has arrived selects nothing.
+start_keys = time.time() + 1.0
+pending_keys = []
+if KEYS:
+    for i, chunk in enumerate(KEYS.split(b"~")):
+        pending_keys.append((start_keys + i, chunk))
+# A program that redraws continuously is almost never between frames when the
+# clock runs out, so a screenshot taken at an arbitrary moment catches a
+# half-drawn screen. Terminals are told where a frame ends by the synchronised
+# update sequence; pyte ignores it, so watch for it here and stop there.
+FRAME_END = b"\x1b[?2026l"
+stopping = False
+while True:
+    if not stopping and time.time() >= deadline:
+        stopping = True
+        grace = time.time() + 3.0
+    if stopping and (time.time() > grace):
+        break
     r, _, _ = select.select([fd], [], [], 0.1)
     if r:
         try:
@@ -33,16 +52,26 @@ while time.time() < deadline:
             break
         if not data:
             break
+        if stopping and FRAME_END in data:
+            # Feed only as far as the end of this frame. A read can span a
+            # frame boundary, and the next frame opens by clearing the
+            # screen, so feeding the whole chunk leaves a blank display with
+            # a few lines of the next frame painted onto it.
+            head, _, _ = data.partition(FRAME_END)
+            stream.feed(head + FRAME_END)
+            break
         stream.feed(data)
-    if KEYS and not sent and time.time() > deadline - SECS / 2:
-        # A "~" in the key string waits a second before the next key. Some
-        # views need time to load before the next keystroke means anything:
-        # pressing enter before the library has arrived selects nothing.
-        for chunk in KEYS.split(b"~"):
-            if chunk:
-                os.write(fd, chunk)
-            time.sleep(1.0)
-        sent = True
+    elif stopping:
+        # Nothing arriving and nothing pending: the screen is already whole.
+        break
+    # Keys are sent on a schedule rather than in a blocking burst. Sleeping
+    # inside this loop stops it reading, the pty buffer fills, and the program
+    # under capture blocks on its own output, which looks exactly like a
+    # program that has hung.
+    while pending_keys and time.time() >= pending_keys[0][0]:
+        _, chunk = pending_keys.pop(0)
+        if chunk:
+            os.write(fd, chunk)
 
 try:
     os.write(fd, b"q")

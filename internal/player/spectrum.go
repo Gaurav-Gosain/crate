@@ -35,6 +35,7 @@ type Spectrum struct {
 	// smoothed carries bar heights between frames so they fall away rather
 	// than flickering; peaks hang briefly like a real analyser.
 	smoothed []float64
+	peaks    []float64
 	window   []float64
 	ready    bool
 	err      error
@@ -93,6 +94,30 @@ func (s *Spectrum) Err() error {
 	return s.err
 }
 
+// BarsWithPeaks returns bar heights and the slowly falling peak marks above
+// them, which is what makes an analyser look like it is measuring something
+// rather than just wobbling.
+func (s *Spectrum) BarsWithPeaks(pos time.Duration, n int) ([]float64, []float64) {
+	vals := s.Bars(pos, n)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.peaks) != len(vals) {
+		s.peaks = make([]float64, len(vals))
+	}
+	for i, v := range vals {
+		if v >= s.peaks[i] {
+			s.peaks[i] = v
+		} else {
+			// Fall slowly, and a little faster the further it has to go.
+			s.peaks[i] -= 0.012 + 0.05*(s.peaks[i]-v)
+			if s.peaks[i] < v {
+				s.peaks[i] = v
+			}
+		}
+	}
+	return vals, append([]float64(nil), s.peaks...)
+}
+
 // Bars returns n bar heights in [0,1] for the audio playing at position pos.
 func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	if n <= 0 {
@@ -103,6 +128,7 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 
 	if len(s.smoothed) != n {
 		s.smoothed = make([]float64, n)
+		s.peaks = make([]float64, n)
 	}
 	if !s.ready || len(s.samples) == 0 {
 		// Decay whatever was on screen rather than snapping to nothing.
@@ -132,8 +158,18 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 
 	// Buckets are spaced logarithmically: pitch is logarithmic, so linear
 	// buckets would crowd everything audible into the first few bars.
+	//
+	// The range stops short of both ends. Below about 35 Hz there is nothing
+	// but rumble, and the top octave of a lossy encode is mostly empty, so
+	// including them spends bars on dead air.
 	bins := fftSize / 2
-	minBin, maxBin := 1.0, float64(bins)
+	lowHz, highHz := 35.0, 14000.0
+	minBin := lowHz * float64(fftSize) / float64(sampleRate)
+	maxBin := highHz * float64(fftSize) / float64(sampleRate)
+	if maxBin > float64(bins) {
+		maxBin = float64(bins)
+	}
+
 	for i := 0; i < n; i++ {
 		lo := int(minBin * math.Pow(maxBin/minBin, float64(i)/float64(n)))
 		hi := int(minBin * math.Pow(maxBin/minBin, float64(i+1)/float64(n)))
@@ -142,6 +178,9 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		}
 		if hi > bins {
 			hi = bins
+		}
+		if lo >= bins {
+			lo = bins - 1
 		}
 		peak := 0.0
 		for b := lo; b < hi; b++ {
@@ -153,21 +192,43 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 				peak = m
 			}
 		}
-		// Decibels, then mapped onto [0,1]. Raw magnitude looks almost flat
-		// because loud and quiet differ by orders of magnitude, not factors.
-		db := 20 * math.Log10(peak+1e-9)
-		v := (db + 60) / 60
+
+		db := 20 * math.Log10(peak+1e-12)
+
+		// Music has roughly pink spectrum: energy falls away as frequency
+		// rises. Displayed flat, the left of the analyser is always tall and
+		// the right always dead. Tilting the response upwards with frequency
+		// is what makes the whole width of the display do something.
+		centre := (float64(lo) + float64(hi)) / 2 * float64(sampleRate) / float64(fftSize)
+		if centre < 20 {
+			centre = 20
+		}
+		db += 4.5 * math.Log2(centre/180)
+
+		// Map the useful part of the range. Starting at -70 rather than -60
+		// and stopping at -15 rather than 0 spreads normal listening levels
+		// across the full height instead of bunching them near the top.
+		v := (db + 70) / 55
 		if v < 0 {
 			v = 0
 		}
 		if v > 1 {
 			v = 1
 		}
+		// Gate the bottom. Every bin in a real recording carries a little
+		// energy, and without this they all render one row tall and the
+		// display grows a permanent slab along its base.
+		if v < 0.11 {
+			v = 0
+		} else {
+			v = (v - 0.11) / 0.89
+		}
+
 		// Rise fast, fall slow.
 		if v > s.smoothed[i] {
 			s.smoothed[i] = v
 		} else {
-			s.smoothed[i] = s.smoothed[i]*0.75 + v*0.25
+			s.smoothed[i] = s.smoothed[i]*0.72 + v*0.28
 		}
 	}
 	return append([]float64(nil), s.smoothed...)
