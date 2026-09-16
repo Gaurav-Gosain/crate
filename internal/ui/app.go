@@ -61,6 +61,13 @@ const (
 	modeOverlay
 )
 
+// write sends a string to the terminal, one writer at a time.
+func (a *App) write(s string) {
+	a.wmu.Lock()
+	defer a.wmu.Unlock()
+	a.tty.WriteString(s)
+}
+
 // App owns the terminal and all mutable view state.
 type App struct {
 	cfg *config.Config
@@ -112,6 +119,14 @@ type App struct {
 	// is what to go back to when it closes.
 	ov       *overlayState
 	prevMode mode
+
+	// wmu serialises writes to the terminal. Several goroutines write: the
+	// drawing loop, and whatever loads album art or releases it. A write is
+	// not atomic, so without this a large one is split and the others land
+	// inside it. That corrupts both: the frame arrives spliced with image
+	// data, and the image arrives truncated, which the terminal reports
+	// later as an image that does not exist.
+	wmu sync.Mutex
 
 	redrawCh chan struct{}
 	quit     chan struct{}

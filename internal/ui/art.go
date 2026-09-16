@@ -55,10 +55,10 @@ func graphicsSupported() bool {
 
 // loadArt pulls the cover out of a track and prepares it for sending.
 //
-// ffmpeg writes raw RGB rather than a PNG so nothing has to be decoded again
-// on this side. The image is cropped square first: the covers on these files
-// are video thumbnails, and a 16:9 picture in a square hole either stretches
-// faces or leaves bars down the sides.
+// The image is cropped square first: the covers on these files are video
+// thumbnails, and a 16:9 picture in a square hole either stretches faces or
+// leaves bars down the sides. It is encoded as a PNG rather than sent as raw
+// pixels, which is a quarter of the bytes and so a quarter of the chunks.
 func loadArt(ctx context.Context, src string, px int) (*art, error) {
 	if px < 32 {
 		px = 32
@@ -71,8 +71,8 @@ func loadArt(ctx context.Context, src string, px int) (*art, error) {
 		"-an",
 		"-frames:v", "1",
 		"-vf", fmt.Sprintf("crop='min(iw,ih)':'min(iw,ih)',scale=%d:%d", px, px),
-		"-f", "rawvideo",
-		"-pix_fmt", "rgb24",
+		"-f", "image2",
+		"-c:v", "png",
 		"-",
 	)
 	var stderr strings.Builder
@@ -81,8 +81,11 @@ func loadArt(ctx context.Context, src string, px int) (*art, error) {
 	if err != nil || len(raw) == 0 {
 		return nil, fmt.Errorf("no cover: %s", strings.TrimSpace(stderr.String()))
 	}
-	if want := px * px * 3; len(raw) != want {
-		return nil, fmt.Errorf("cover is %d bytes, expected %d", len(raw), want)
+	// A PNG starts with a fixed signature. Checking it catches ffmpeg writing
+	// a diagnostic to stdout instead of an image, which would otherwise be
+	// sent to the terminal as if it were pixels.
+	if len(raw) < 8 || string(raw[1:4]) != "PNG" {
+		return nil, fmt.Errorf("cover is not a png (%d bytes)", len(raw))
 	}
 
 	return &art{
@@ -124,8 +127,10 @@ func (a *art) transmitCmd() string {
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(&b, "\x1b_Ga=t,i=%d,f=24,s=%d,v=%d,q=1,m=%d;%s\x1b\\",
-				a.id, a.px, a.px, more, part)
+			// f=100 is PNG. The terminal decodes it, which costs it nothing
+			// and saves sending three quarters of the bytes.
+			fmt.Fprintf(&b, "\x1b_Ga=t,i=%d,f=100,q=1,m=%d;%s\x1b\\",
+				a.id, more, part)
 			first = false
 			continue
 		}

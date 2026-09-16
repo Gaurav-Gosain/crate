@@ -54,7 +54,7 @@ func (a *App) draw() {
 		a.drawOverlay(&b, w, h)
 		a.drawFooter(&b, w, h, prompt, buf)
 		b.WriteString("\x1b[?2026l")
-		a.tty.WriteString(b.String())
+		a.write(b.String())
 		return
 	}
 
@@ -62,7 +62,7 @@ func (a *App) draw() {
 		a.drawPlay(&b, w, h)
 		a.drawFooter(&b, w, h, prompt, buf)
 		b.WriteString("\x1b[?2026l")
-		a.tty.WriteString(b.String())
+		a.write(b.String())
 		return
 	}
 
@@ -70,7 +70,7 @@ func (a *App) draw() {
 		a.drawResults(&b, w, h)
 		a.drawFooter(&b, w, h, prompt, buf)
 		b.WriteString("\x1b[?2026l")
-		a.tty.WriteString(b.String())
+		a.write(b.String())
 		return
 	}
 
@@ -78,7 +78,7 @@ func (a *App) draw() {
 	a.drawFooter(&b, w, h, prompt, buf)
 
 	b.WriteString("\x1b[?2026l")
-	a.tty.WriteString(b.String())
+	a.write(b.String())
 }
 
 // drawMain renders the sources list and the activity log, which is the view

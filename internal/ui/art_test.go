@@ -15,7 +15,7 @@ func TestTransmitChunksTheImage(t *testing.T) {
 	if n := strings.Count(out, "\x1b_G"); n != 3 {
 		t.Fatalf("want 3 escapes for a payload of 2 chunks plus a remainder, got %d", n)
 	}
-	if !strings.Contains(out, "a=t,i=7101,f=24,s=8,v=8,q=1,m=1;") {
+	if !strings.Contains(out, "a=t,i=7101,f=100,q=1,m=1;") {
 		t.Fatalf("first chunk is missing its header or its continuation flag:\n%s", out[:120])
 	}
 	if strings.Count(out, "m=1;") != 2 {

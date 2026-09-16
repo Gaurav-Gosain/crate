@@ -68,7 +68,7 @@ func (a *App) leavePlay() {
 	a.mode = modeList
 	a.mu.Unlock()
 	if cover != nil {
-		a.tty.WriteString(cover.deleteCmd())
+		a.write(cover.deleteCmd())
 		cover.cleanup()
 	}
 	if p != nil {
@@ -144,7 +144,7 @@ func (a *App) playSelected() {
 	// terminal keeps every image it has ever been sent, and a long listening
 	// session quietly grows its memory by a cover a track.
 	if old != nil {
-		a.tty.WriteString(old.deleteCmd())
+		a.write(old.deleteCmd())
 		old.cleanup()
 	}
 
@@ -162,17 +162,22 @@ func (a *App) playSelected() {
 		}
 		a.mu.Lock()
 		stale := a.coverFor != song.Rel
-		if !stale {
-			a.cover = art
-		}
 		a.mu.Unlock()
 		if stale {
 			art.cleanup()
 			return
 		}
-		// Send the pixels on their own, outside any frame, then let the
-		// frames place the stored image. The data only needs to cross once.
-		a.tty.WriteString(art.transmitCmd())
+
+		// Send the pixels before publishing the cover, not after. Published
+		// first, a frame can place an image the terminal has not been given
+		// yet, and it answers every such frame with "image not found".
+		a.write(art.transmitCmd())
+
+		a.mu.Lock()
+		if a.coverFor == song.Rel {
+			a.cover = art
+		}
+		a.mu.Unlock()
 		a.redraw()
 	}()
 }

@@ -90,7 +90,7 @@ func New() (*Player, error) {
 	p.conn = conn
 
 	go p.readLoop()
-	go p.pollLoop()
+	p.observe()
 	return p, nil
 }
 
@@ -103,9 +103,14 @@ func (p *Player) readLoop() {
 			RequestID int             `json:"request_id"`
 			Data      json.RawMessage `json:"data"`
 			Event     string          `json:"event"`
+			Name      string          `json:"name"`
 			Error     string          `json:"error"`
 		}
 		if err := json.Unmarshal(sc.Bytes(), &msg); err != nil {
+			continue
+		}
+		if msg.Event == "property-change" {
+			p.applyProperty(msg.Name, msg.Data)
 			continue
 		}
 		if msg.Event == "end-file" {
@@ -132,37 +137,52 @@ func (p *Player) readLoop() {
 	}
 }
 
-// pollLoop keeps position and duration fresh. mpv can push property changes,
-// but polling four times a second is simpler and costs nothing measurable,
-// and the display only needs to be roughly current.
-func (p *Player) pollLoop() {
-	t := time.NewTicker(250 * time.Millisecond)
-	defer t.Stop()
-	for range t.C {
-		p.mu.Lock()
-		closed := p.closed
-		p.mu.Unlock()
-		if closed {
+// applyProperty records a property mpv has told us about.
+func (p *Player) applyProperty(name string, data json.RawMessage) {
+	switch name {
+	case "time-pos":
+		var v float64
+		if json.Unmarshal(data, &v) != nil {
 			return
 		}
-		if pos, ok := p.getFloat("time-pos"); ok {
-			p.mu.Lock()
-			p.state.Position = time.Duration(pos * float64(time.Second))
+		p.mu.Lock()
+		p.state.Position = time.Duration(v * float64(time.Second))
+		p.posAt = time.Now()
+		p.mu.Unlock()
+	case "duration":
+		var v float64
+		if json.Unmarshal(data, &v) != nil {
+			return
+		}
+		p.mu.Lock()
+		p.state.Duration = time.Duration(v * float64(time.Second))
+		p.mu.Unlock()
+	case "pause":
+		var v bool
+		if json.Unmarshal(data, &v) != nil {
+			return
+		}
+		p.mu.Lock()
+		if p.state.Path != "" {
+			p.state.Playing = !v
+			// Reset the clock the interpolation counts from, so a pause is
+			// not later treated as time the track spent playing.
 			p.posAt = time.Now()
-			p.mu.Unlock()
 		}
-		if dur, ok := p.getFloat("duration"); ok {
-			p.mu.Lock()
-			p.state.Duration = time.Duration(dur * float64(time.Second))
-			p.mu.Unlock()
-		}
-		if paused, ok := p.getBool("pause"); ok {
-			p.mu.Lock()
-			if p.state.Path != "" {
-				p.state.Playing = !paused
-			}
-			p.mu.Unlock()
-		}
+		p.mu.Unlock()
+	}
+}
+
+// observe asks mpv to report these properties as they change.
+//
+// Polling for them meant three synchronous round trips every quarter second,
+// and when any of them was slow the readings arrived late. The display carries
+// the position forward from the last reading, so a late reading means the
+// clock runs on and then snaps back when it lands: it visibly jumps. Letting
+// mpv push the changes removes both the round trips and the jump.
+func (p *Player) observe() {
+	for i, prop := range []string{"time-pos", "duration", "pause"} {
+		p.command("observe_property", i+1, prop)
 	}
 }
 
@@ -278,7 +298,15 @@ func (p *Player) State() State {
 	defer p.mu.Unlock()
 	st := p.state
 	if st.Playing && !p.posAt.IsZero() {
-		st.Position += time.Since(p.posAt)
+		// Carry the position forward between updates so it advances smoothly,
+		// but only so far. mpv reports time-pos several times a second; if an
+		// update goes missing, running the clock on indefinitely would show a
+		// time the track never reached and then jump back when it resumed.
+		ahead := time.Since(p.posAt)
+		if ahead > time.Second {
+			ahead = time.Second
+		}
+		st.Position += ahead
 		if st.Duration > 0 && st.Position > st.Duration {
 			st.Position = st.Duration
 		}
