@@ -25,6 +25,18 @@ import (
 // sending it back, which moves the whole library twice to change a few
 // hundred bytes in each file.
 func EmbedLyrics(ctx context.Context, c *config.Config, words map[string]string, log func(string, ...any)) (int, error) {
+	return embedTag(ctx, c, "lyrics", words, log)
+}
+
+// EmbedIDs writes the video each track came from into the track.
+//
+// Tracks downloaded before crate started recording this carry only a title,
+// and a title is not enough to find the captions for a particular upload.
+func EmbedIDs(ctx context.Context, c *config.Config, ids map[string]string, log func(string, ...any)) (int, error) {
+	return embedTag(ctx, c, "youtube_id", ids, log)
+}
+
+func embedTag(ctx context.Context, c *config.Config, tag string, words map[string]string, log func(string, ...any)) (int, error) {
 	if len(words) == 0 {
 		return 0, nil
 	}
@@ -50,7 +62,7 @@ func EmbedLyrics(ctx context.Context, c *config.Config, words map[string]string,
 		}
 	}
 
-	stage := "/tmp/crate-lyrics-stage"
+	stage := "/tmp/crate-tag-stage"
 	rsh := "ssh -o BatchMode=yes"
 	if out, err := exec.CommandContext(ctx, "rsync",
 		"-rlt", "--delete", "--no-perms", "--no-owner", "--no-group",
@@ -66,6 +78,7 @@ func EmbedLyrics(ctx context.Context, c *config.Config, words map[string]string,
 	script := strings.NewReplacer(
 		"__STAGE__", stage,
 		"__ROOT__", strings.TrimSuffix(c.Remote.Path, "/"),
+		"__TAG__", tag,
 	).Replace(embedScript)
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", c.Remote.Host, "sudo python3 -")
 	cmd.Stdin = strings.NewReader(script)
@@ -112,7 +125,7 @@ for dirpath, _, names in os.walk(stage):
             au = File(track)
             if au is None:
                 continue
-            au["lyrics"] = [words]
+            au["__TAG__"] = [words]
             au.save()
             done += 1
         except Exception as e:

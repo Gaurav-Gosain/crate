@@ -202,6 +202,15 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 		l.Offset = LoadOffset(artist, title)
 		return l, nil
 	}
+	// A second catalogue, which holds a good deal that the first does not.
+	// It is tried afterwards rather than alongside because its search is
+	// looser, so its results need the stricter test inside it.
+	if l, err := fetchNetease(ctx, names, clean, dur); err == nil {
+		writeCache(artist, title, l.LRC())
+		l.Offset = LoadOffset(artist, title)
+		return l, nil
+	}
+
 	if lastErr != nil {
 		return nil, lastErr
 	}
