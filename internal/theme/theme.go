@@ -9,7 +9,7 @@ package theme
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,7 +113,7 @@ func Names() []string {
 	for _, t := range themes {
 		out = append(out, t.Name)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -153,25 +153,9 @@ func Current() Theme {
 	return current
 }
 
-// Next cycles to the following theme and returns its name, for a key that
-// flips through them.
-func Next() string {
-	mu.Lock()
-	defer mu.Unlock()
-	themes := all()
-	for i, t := range themes {
-		if t.Name == current.Name {
-			current = themes[(i+1)%len(themes)]
-			return current.Name
-		}
-	}
-	current = themes[0]
-	return current.Name
-}
-
 // Fg returns the escape sequence setting the foreground to a hex colour.
 func Fg(hex string) string {
-	r, g, b := rgb(hex)
+	r, g, b := RGB(hex)
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
@@ -179,14 +163,14 @@ func Fg(hex string) string {
 // for a selected row that should read as a filled bar rather than as merely
 // differently coloured text.
 func Bg(hex string) string {
-	r, g, b := rgb(hex)
+	r, g, b := RGB(hex)
 	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 }
 
 // Ink returns a foreground that stays readable on the given background,
 // chosen by the background's brightness rather than assumed.
 func Ink(hex string) string {
-	r, g, b := rgb(hex)
+	r, g, b := RGB(hex)
 	if (r*299+g*587+b*114)/1000 > 140 {
 		return "\x1b[38;2;16;16;20m"
 	}
@@ -215,15 +199,15 @@ func (t Theme) SpectrumAt(p float64) string {
 		return Fg(t.Spectrum[len(t.Spectrum)-1])
 	}
 	f := x - float64(i)
-	r1, g1, b1 := rgb(t.Spectrum[i])
-	r2, g2, b2 := rgb(t.Spectrum[i+1])
+	r1, g1, b1 := RGB(t.Spectrum[i])
+	r2, g2, b2 := RGB(t.Spectrum[i+1])
 	lerp := func(a, b int) int { return a + int(f*float64(b-a)) }
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", lerp(r1, r2), lerp(g1, g2), lerp(b1, b2))
 }
 
-// rgb parses "#rrggbb". An unparseable colour comes back mid grey, which is
+// RGB parses "#rrggbb". An unparseable colour comes back mid grey, which is
 // visible but obviously wrong, rather than black on black.
-func rgb(hex string) (int, int, int) {
+func RGB(hex string) (int, int, int) {
 	h := strings.TrimPrefix(hex, "#")
 	if len(h) != 6 {
 		return 128, 128, 128

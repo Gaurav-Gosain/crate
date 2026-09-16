@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
@@ -25,16 +26,16 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 	go func() {
 		defer close(done)
 		for e := range ev {
-			if e.Pct < 0 && interestingLine(e.Text) {
+			if e.Pct < 0 && Interesting(e.Text) {
 				log("%s", e.Text)
 			}
 		}
 	}()
 
 	// Sources run concurrently as well as being sharded internally. The
-	// semaphore is what actually bounds process count: without it, n sources
-	// each fanning out to n workers would start n squared yt-dlp processes.
-	sem := make(chan struct{}, c.Parallel)
+	// semaphore is shared by every shard of every source, so it is what
+	// actually bounds the number of yt-dlp processes.
+	sem := make(chan struct{}, max(c.Parallel, 1))
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -44,10 +45,8 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 		wg.Add(1)
 		go func(s config.Source) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
 			log("== %s", s.Name)
-			if err := Download(ctx, c, s, ev); err != nil {
+			if err := Download(ctx, c, s, ev, sem); err != nil {
 				mu.Lock()
 				failures++
 				mu.Unlock()
@@ -95,14 +94,27 @@ func RunAll(ctx context.Context, c *config.Config, log func(string, ...any)) err
 	return nil
 }
 
-func interestingLine(s string) bool {
-	for _, p := range []string{
-		"[download] Destination:", "[ExtractAudio]", "ERROR", "WARNING",
-		"has already been recorded",
-	} {
-		if len(s) >= len(p) && s[:len(p)] == p {
-			return true
-		}
+// Interesting filters the tool firehose down to the lines a person would
+// want in a log. It lives here rather than in the interface because both the
+// interface and the headless sync read the same yt-dlp and rsync output.
+//
+// The archive-hit line is matched anywhere in the string: it reads
+// "[download] <title> has already been recorded in the archive", so an
+// earlier prefix match never fired and those lines silently vanished from
+// the headless log.
+func Interesting(s string) bool {
+	switch {
+	case strings.HasPrefix(s, "[download] Destination:"),
+		strings.HasPrefix(s, "[ExtractAudio]"),
+		strings.HasPrefix(s, "[Metadata]"),
+		strings.Contains(s, "has already been recorded"),
+		strings.HasPrefix(s, "ERROR"),
+		strings.HasPrefix(s, "WARNING"):
+		return true
+	case strings.Contains(s, "sent ") && strings.Contains(s, "bytes"):
+		// rsync's closing summary, which is the one line of a mirror worth
+		// keeping.
+		return true
 	}
 	return false
 }

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gaurav-Gosain/crate/internal/theme"
 )
@@ -185,28 +185,25 @@ func (a *App) previewCurrent() {
 }
 
 // drawOverlay renders the floating list.
+//
+// Everything it needs is copied out under the lock first: the input goroutine
+// rewrites the filter and the filtered list mid-keystroke, and drawing from
+// the live fields raced with it.
 func (a *App) drawOverlay(b *strings.Builder, w, h int) {
 	a.mu.Lock()
 	ov := a.ov
-	a.mu.Unlock()
 	if ov == nil {
+		a.mu.Unlock()
 		return
 	}
+	title, hint := ov.title, ov.hint
+	filter := string(ov.filter)
+	shown := ov.shown
+	cursor := ov.cursor
+	a.mu.Unlock()
 
-	bw := w * 2 / 3
-	if bw > 68 {
-		bw = 68
-	}
-	if bw < 30 {
-		bw = 30
-	}
-	visible := 12
-	if visible > h-10 {
-		visible = h - 10
-	}
-	if visible < 3 {
-		visible = 3
-	}
+	bw := clamp(w*2/3, 30, 68)
+	visible := max(min(12, h-10), 3)
 	bh := visible + 5
 	bx := (w-bw)/2 + 1
 	by := (h-bh)/2 + 1
@@ -214,45 +211,44 @@ func (a *App) drawOverlay(b *strings.Builder, w, h int) {
 	box := rect{bx, by, bw, bh}
 	// Clear the area first: the overlay floats over the interface, and
 	// without this the text underneath shows through the gaps.
-	for i := 0; i < bh; i++ {
+	for i := range bh {
 		moveTo(b, by+i, bx)
 		b.WriteString(strings.Repeat(" ", bw))
 	}
-	panel(b, box, ov.title, true)
+	panel(b, box, title, true)
 	in := box.inner()
 
 	// Filter line.
 	moveTo(b, in.y, in.x+1)
-	shown := string(ov.filter)
-	if shown == "" {
+	if filter == "" {
 		fmt.Fprintf(b, "%s%s type to filter%s", muted, "›", reset)
 	} else {
-		fmt.Fprintf(b, "%s›%s %s%s%s%s", accent, reset, fg, truncate(shown, in.w-4), reset, accent+"▏"+reset)
+		fmt.Fprintf(b, "%s›%s %s%s%s%s", accent, reset, fg, truncate(filter, in.w-4), reset, accent+"▏"+reset)
 	}
 	moveTo(b, in.y+1, in.x)
 	fmt.Fprintf(b, "%s%s%s", rule, strings.Repeat("─", in.w), reset)
 
 	listY := in.y + 2
 	a.mu.Lock()
-	if ov.cursor < ov.top {
-		ov.top = ov.cursor
+	if cursor < ov.top {
+		ov.top = cursor
 	}
-	if ov.cursor >= ov.top+visible {
-		ov.top = ov.cursor - visible + 1
+	if cursor >= ov.top+visible {
+		ov.top = cursor - visible + 1
 	}
 	top := ov.top
 	ov.box, ov.rows = box, rect{in.x, listY, in.w, visible}
 	a.mu.Unlock()
 
-	if len(ov.shown) == 0 {
+	if len(shown) == 0 {
 		moveTo(b, listY, in.x+1)
 		fmt.Fprintf(b, "%sno matches%s", muted, reset)
 	}
 
-	for i := 0; i < visible && top+i < len(ov.shown); i++ {
-		it := ov.shown[top+i]
+	for i := 0; i < visible && top+i < len(shown); i++ {
+		it := shown[top+i]
 		moveTo(b, listY+i, in.x)
-		selected := top+i == ov.cursor
+		selected := top+i == cursor
 
 		// The selected row is built without any styling of its own. Every
 		// reset inside a line clears the background as well as the colour,
@@ -293,7 +289,7 @@ func (a *App) drawOverlay(b *strings.Builder, w, h int) {
 
 	// Footer hint.
 	moveTo(b, in.y+in.h-1, in.x+1)
-	fmt.Fprintf(b, "%s%s%s", muted, truncate(ov.hint, in.w-2), reset)
+	fmt.Fprintf(b, "%s%s%s", muted, truncate(hint, in.w-2), reset)
 }
 
 // handleOverlayMouse lets the overlay be driven with the pointer.
@@ -396,7 +392,7 @@ func sliceCells(s string, off, w int) string {
 			i += l
 			continue
 		}
-		r, size := utf8DecodeRune(s[i:])
+		r, size := utf8.DecodeRuneInString(s[i:])
 		rw := runeWidth(r)
 		if cell >= off && cell+rw <= off+w {
 			b.WriteRune(r)
@@ -408,14 +404,4 @@ func sliceCells(s string, off, w int) string {
 		}
 	}
 	return b.String()
-}
-
-// utf8DecodeRune is a tiny wrapper so this file does not import unicode/utf8
-// under a name that shadows the unicode import used above.
-func utf8DecodeRune(s string) (rune, int) {
-	for i, r := range s {
-		_ = i
-		return r, len(string(r))
-	}
-	return unicode.ReplacementChar, 1
 }

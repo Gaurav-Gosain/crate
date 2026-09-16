@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +31,7 @@ func (a *App) readKeys() {
 	for {
 		n, err := a.tty.Read(buf)
 		if err != nil || n == 0 {
-			close(a.quit)
+			a.stop()
 			return
 		}
 		pending = append(pending, buf[:n]...)
@@ -53,7 +54,7 @@ func (a *App) readKeys() {
 			} else if ok {
 				pending = pending[n:]
 				if a.handleKey(k) {
-					close(a.quit)
+					a.stop()
 					return
 				}
 				continue
@@ -68,7 +69,7 @@ func (a *App) readKeys() {
 			if ok {
 				pending = pending[consumed:]
 				if a.handleMouse(ev) {
-					close(a.quit)
+					a.stop()
 					return
 				}
 				continue
@@ -79,7 +80,7 @@ func (a *App) readKeys() {
 				continue
 			}
 			if a.handleKey(pending[0]) {
-				close(a.quit)
+				a.stop()
 				return
 			}
 			pending = pending[1:]
@@ -186,66 +187,61 @@ func (a *App) beginPrompt(label string, fn func(string)) {
 
 func (a *App) moveCursor(d int) {
 	a.mu.Lock()
-	a.cursor += d
-	if a.cursor < 0 {
-		a.cursor = 0
-	}
-	if a.cursor >= len(a.rows) {
-		a.cursor = max(len(a.rows)-1, 0)
-	}
+	a.cursor = clamp(a.cursor+d, 0, max(len(a.rows)-1, 0))
 	a.mu.Unlock()
 	a.redraw()
 }
 
 func (a *App) setCursor(i int) {
 	a.mu.Lock()
-	if i < 0 {
-		i = 0
-	}
-	if i >= len(a.rows) {
-		i = max(len(a.rows)-1, 0)
-	}
-	a.cursor = i
+	a.cursor = clamp(i, 0, max(len(a.rows)-1, 0))
 	a.mu.Unlock()
 	a.redraw()
+}
+
+// commitSource appends a source to the config and the list, saves, and
+// reports it in the log along with a warning for the source shapes that pull
+// in far more than an album. It returns the new row's index, or -1 when the
+// save failed. Shared by the url prompt and the search results, which used
+// to carry two drifting copies of this.
+func (a *App) commitSource(s config.Source) int {
+	a.mu.Lock()
+	a.cfg.ClearRemoved(s.URL)
+	a.cfg.Sources = append(a.cfg.Sources, s)
+	a.rows = append(a.rows, row{src: s, state: idle})
+	idx := len(a.rows) - 1
+	a.cursor = idx
+	a.mu.Unlock()
+
+	if err := a.saveCfg(); err != nil {
+		a.logf("could not save config: %v", err)
+		return -1
+	}
+	a.logf("added %s", s.Name)
+	switch {
+	case config.IsEndlessMix(s.URL):
+		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
+	case config.IsArtistChannel(s.URL):
+		a.logf("note: that is a whole artist catalogue, usually hundreds of tracks and several gigabytes")
+	}
+	return idx
 }
 
 // addSource derives a readable name from the URL so the list is scannable
 // without the user having to name every playlist by hand.
 func (a *App) addSource(url string) {
-	name := deriveName(url)
 	if n := config.NormalizeURL(url); n != url {
 		a.logf("using the releases tab, which has album and track tags")
 		url = n
-		name = deriveName(url)
 	}
-	s := config.Source{Name: name, URL: url}
-
-	a.mu.Lock()
-	a.cfg.ClearRemoved(s.URL)
-	a.cfg.Sources = append(a.cfg.Sources, s)
-	a.rows = append(a.rows, row{src: s, state: idle})
-	a.mu.Unlock()
-
-	if err := a.cfg.Save(); err != nil {
-		a.logf("could not save config: %v", err)
+	idx := a.commitSource(config.Source{Name: deriveName(url), URL: url})
+	if idx < 0 {
 		return
-	}
-	a.logf("added %s", name)
-	switch {
-	case config.IsEndlessMix(url):
-		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
-	case config.IsArtistChannel(url):
-		a.logf("note: that is a whole artist catalogue, usually hundreds of tracks and several gigabytes")
 	}
 
 	// Adding a source and having nothing happen is not what anyone means by
 	// adding it, so fetch it straight away. Syncing the whole library again
 	// later is free for anything already in the download archive.
-	a.mu.Lock()
-	idx := len(a.rows) - 1
-	a.cursor = idx
-	a.mu.Unlock()
 	a.redraw()
 	a.run([]int{idx})
 }
@@ -258,8 +254,8 @@ func (a *App) removeSelected() {
 	}
 	i := a.cursor
 	src := a.rows[i].src
-	a.rows = append(a.rows[:i], a.rows[i+1:]...)
-	a.cfg.Sources = append(a.cfg.Sources[:i], a.cfg.Sources[i+1:]...)
+	a.rows = slices.Delete(a.rows, i, i+1)
+	a.cfg.Sources = slices.Delete(a.cfg.Sources, i, i+1)
 	if a.cursor >= len(a.rows) {
 		a.cursor = max(len(a.rows)-1, 0)
 	}
@@ -269,7 +265,7 @@ func (a *App) removeSelected() {
 	a.cfg.MarkRemoved(src.URL)
 	a.mu.Unlock()
 
-	if err := a.cfg.Save(); err != nil {
+	if err := a.saveCfg(); err != nil {
 		a.logf("could not save config: %v", err)
 		return
 	}
@@ -280,13 +276,22 @@ func (a *App) removeSelected() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := state.Push(ctx, a.cfg); err != nil {
+		// Publish the tombstone first, so the removal sticks even if the
+		// track deletion below fails part way.
+		if err := state.Push(ctx, a.cfgSnapshot()); err != nil {
 			a.logf("   could not publish removal: %v", err)
 		}
 		r, err := library.RemoveTracks(ctx, a.cfg, src, a.logf)
 		if err != nil {
 			a.logf("   could not remove tracks: %v", err)
 			return
+		}
+		// Push again now the archive has forgotten the removed ids. The
+		// first push sent the archive with the ids still in it, and leaving
+		// that copy on the remote meant the next pull resurrected them, so
+		// re-adding the source downloaded nothing.
+		if err := state.Push(ctx, a.cfgSnapshot()); err != nil {
+			a.logf("   could not publish the pruned archive: %v", err)
 		}
 		if r.Files == 0 {
 			a.logf("   no tracks to remove")

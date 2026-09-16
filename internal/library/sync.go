@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,12 +74,17 @@ func Sync(ctx context.Context, c *config.Config, ev chan<- Event) error {
 		}
 		e := Event{Source: "mirror", Text: line, Pct: -1, Phase: PhaseMirroring}
 		if m := pctRe.FindStringSubmatch(line); m != nil {
-			fmt.Sscanf(m[1], "%f", &e.Pct)
+			if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+				e.Pct = v
+			}
 		}
 		if m := speedRe.FindStringSubmatch(line); m != nil {
 			e.Speed = strings.TrimSpace(m[1])
 		}
 		send(ev, e)
+	}
+	if sc.Err() != nil {
+		io.Copy(io.Discard, stdout)
 	}
 	return cmd.Wait()
 }

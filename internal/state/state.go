@@ -15,9 +15,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
@@ -43,16 +45,12 @@ type shared struct {
 // beaten only by adding the source again, which clears it.
 func merge(remote shared, c *config.Config) []config.Source {
 	tombs := map[string]string{}
-	for k, v := range remote.Removed {
-		tombs[k] = v
-	}
-	for k, v := range c.Removed {
-		tombs[k] = v
-	}
+	maps.Copy(tombs, remote.Removed)
+	maps.Copy(tombs, c.Removed)
 
 	var out []config.Source
 	seen := map[string]bool{}
-	for _, s := range append(append([]config.Source{}, remote.Sources...), c.Sources...) {
+	for _, s := range slices.Concat(remote.Sources, c.Sources) {
 		key := config.NormalizeURL(s.URL)
 		if seen[key] || tombs[key] != "" {
 			continue
@@ -69,14 +67,19 @@ func merge(remote shared, c *config.Config) []config.Source {
 // Missing remote state is not an error: the first machine to run simply has
 // nothing to fetch, and its own state becomes the shared one on the next push.
 func Pull(ctx context.Context, c *config.Config) error {
-	dir, err := localDir(c)
+	dir, err := localDir()
 	if err != nil {
 		return err
 	}
-	if err := fetch(ctx, c, sourcesFile, filepath.Join(dir, sourcesFile)); err != nil {
+	if err := fetch(ctx, c, sourcesFile, filepath.Join(dir, sourcesFile), false); err != nil {
 		return err
 	}
-	if err := fetch(ctx, c, archiveFile, c.ArchivePath()); err != nil {
+	// The archive is fetched with --update so an older remote copy cannot
+	// clobber a newer local one. That happened two ways: a run that
+	// downloaded but crashed before pushing lost its record at the next
+	// start, and a removal that pruned ids locally had them resurrected by
+	// the stale remote copy before the pruned version was pushed.
+	if err := fetch(ctx, c, archiveFile, c.ArchivePath(), true); err != nil {
 		return err
 	}
 
@@ -97,7 +100,7 @@ func Pull(ctx context.Context, c *config.Config) error {
 
 // Push sends the local sources and archive back up.
 func Push(ctx context.Context, c *config.Config) error {
-	dir, err := localDir(c)
+	dir, err := localDir()
 	if err != nil {
 		return err
 	}
@@ -121,17 +124,24 @@ func Push(ctx context.Context, c *config.Config) error {
 	return nil
 }
 
-func localDir(c *config.Config) (string, error) {
+func localDir() (string, error) {
 	dir := filepath.Join(filepath.Dir(config.Path()), "state")
 	return dir, os.MkdirAll(dir, 0o700)
 }
 
-func fetch(ctx context.Context, c *config.Config, name, dest string) error {
+// fetch copies one state file down. keepNewer skips the copy when the local
+// file is newer than the remote one, for files that are live local state
+// rather than staging.
+func fetch(ctx context.Context, c *config.Config, name, dest string, keepNewer bool) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 	src := fmt.Sprintf("%s:%s/%s", c.Remote.Host, strings.TrimSuffix(c.Remote.StatePath(), "/"), name)
-	cmd := exec.CommandContext(ctx, "rsync", "-qt", "--timeout", "60", src, dest)
+	args := []string{"-qt", "--timeout", "60"}
+	if keepNewer {
+		args = append(args, "--update")
+	}
+	cmd := exec.CommandContext(ctx, "rsync", append(args, src, dest)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Exit 23 covers "no such file", which is the normal first-run case.

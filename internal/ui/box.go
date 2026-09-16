@@ -94,7 +94,7 @@ func progress(pct float64, w int) string {
 	pos := int(pct * float64(w-1))
 	var b strings.Builder
 	b.WriteString(accent)
-	for i := 0; i < w; i++ {
+	for i := range w {
 		switch {
 		case i == pos:
 			b.WriteString("●")

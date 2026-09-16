@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 )
@@ -224,10 +225,7 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		return append([]float64(nil), s.smoothed...)
 	}
 
-	start := int(pos.Seconds() * sampleRate)
-	if start < 0 {
-		start = 0
-	}
+	start := max(int(pos.Seconds()*sampleRate), 0)
 	if start+fftSize > len(s.samples) {
 		for i := range s.smoothed {
 			s.smoothed[i] *= 0.8
@@ -241,7 +239,7 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		s.mag = make([]float64, fftSize/2)
 	}
 	re, im := s.re, s.im
-	for i := 0; i < fftSize; i++ {
+	for i := range fftSize {
 		re[i] = s.samples[start+i] * s.window[i]
 		im[i] = 0
 	}
@@ -251,7 +249,7 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	// 0 dB. Without this every bin reads about +54 dB, the scaling below
 	// clamps it, and the display is a solid wall.
 	bins := fftSize / 2
-	for b := 0; b < bins; b++ {
+	for b := range bins {
 		s.mag[b] = math.Hypot(re[b], im[b]) / float64(fftSize/2)
 	}
 
@@ -264,11 +262,9 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	lowHz, highHz := 35.0, 14000.0
 	minBin := lowHz * float64(fftSize) / float64(sampleRate)
 	maxBin := highHz * float64(fftSize) / float64(sampleRate)
-	if maxBin > float64(bins-1) {
-		maxBin = float64(bins - 1)
-	}
+	maxBin = min(maxBin, float64(bins-1))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		lo := minBin * math.Pow(maxBin/minBin, float64(i)/float64(n))
 		hi := minBin * math.Pow(maxBin/minBin, float64(i+1)/float64(n))
 
@@ -293,19 +289,10 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 		// rises. Displayed flat, the left of the analyser is always tall and
 		// the right always dead. Tilting the response upwards with frequency
 		// is what makes the whole width of the display do something.
-		centre := (lo + hi) / 2 * float64(sampleRate) / float64(fftSize)
-		if centre < 20 {
-			centre = 20
-		}
+		centre := max((lo+hi)/2*float64(sampleRate)/float64(fftSize), 20)
 		db += 4.5 * math.Log2(centre/180)
 
-		v := (db + 70) / 55
-		if v < 0 {
-			v = 0
-		}
-		if v > 1 {
-			v = 1
-		}
+		v := clamp01((db + 70) / 55)
 		if v < 0.11 {
 			v = 0
 		} else {
@@ -320,7 +307,7 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 	// analyser is supposed to be.
 	spread(s.raw, s.work)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := s.work[i]
 		if v > s.smoothed[i] {
 			// Rise immediately: a transient that arrives late has been missed.
@@ -353,31 +340,25 @@ func (s *Spectrum) Bars(pos time.Duration, n int) []float64 {
 // settles rather than pumping. It refuses to amplify near silence, which
 // would turn the noise floor between tracks into a full height display.
 func (s *Spectrum) normalise() []float64 {
-	peak := 0.0
-	for _, v := range s.smoothed {
-		if v > peak {
-			peak = v
-		}
-	}
+	peak := slices.Max(s.smoothed)
 	if peak > s.agc {
 		s.agc += (peak - s.agc) * 0.35
 	} else {
 		s.agc += (peak - s.agc) * 0.02
 	}
-	if s.agc < 0.18 {
-		s.agc = 0.18
-	}
+	s.agc = max(s.agc, 0.18)
 
 	scale := 0.96 / s.agc
 	out := make([]float64, len(s.smoothed))
 	for i, v := range s.smoothed {
-		x := v * scale
-		if x > 1 {
-			x = 1
-		}
-		out[i] = x
+		out[i] = min(v*scale, 1)
 	}
 	return out
+}
+
+// clamp01 pins a value into [0,1].
+func clamp01(v float64) float64 {
+	return min(max(v, 0), 1)
 }
 
 // interp reads the magnitude at a fractional bin, between the two either side.

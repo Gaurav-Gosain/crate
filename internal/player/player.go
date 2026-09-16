@@ -76,7 +76,7 @@ func New() (*Player, error) {
 	// mpv creates the socket a moment after starting.
 	var conn net.Conn
 	var err error
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		conn, err = net.Dial("unix", sock)
 		if err == nil {
 			break
@@ -85,6 +85,9 @@ func New() (*Player, error) {
 	}
 	if conn == nil {
 		cmd.Process.Kill()
+		// Reap it, or the dead process lingers as a zombie for the rest of
+		// the session.
+		cmd.Wait()
 		return nil, fmt.Errorf("mpv did not open its control socket: %w", err)
 	}
 	p.conn = conn
@@ -96,6 +99,17 @@ func New() (*Player, error) {
 
 // readLoop dispatches replies and events from mpv.
 func (p *Player) readLoop() {
+	// Whatever ends the loop, release anyone still waiting on a reply.
+	// Without this a command issued just as the player closes sits out its
+	// whole timeout for an answer that can never arrive.
+	defer func() {
+		p.mu.Lock()
+		for id, ch := range p.pending {
+			delete(p.pending, id)
+			close(ch)
+		}
+		p.mu.Unlock()
+	}()
 	sc := bufio.NewScanner(p.conn)
 	sc.Buffer(make([]byte, 0, 8192), 1<<20)
 	for sc.Scan() {
@@ -220,30 +234,6 @@ func (p *Player) command(args ...any) (json.RawMessage, bool) {
 	}
 }
 
-func (p *Player) getFloat(prop string) (float64, bool) {
-	data, ok := p.command("get_property", prop)
-	if !ok || len(data) == 0 {
-		return 0, false
-	}
-	var v float64
-	if err := json.Unmarshal(data, &v); err != nil {
-		return 0, false
-	}
-	return v, true
-}
-
-func (p *Player) getBool(prop string) (bool, bool) {
-	data, ok := p.command("get_property", prop)
-	if !ok || len(data) == 0 {
-		return false, false
-	}
-	var v bool
-	if err := json.Unmarshal(data, &v); err != nil {
-		return false, false
-	}
-	return v, true
-}
-
 // Play loads a file or URL and starts it.
 func (p *Player) Play(path string) error {
 	// Only a local path can be checked ahead of time. Statting a URL fails
@@ -258,6 +248,11 @@ func (p *Player) Play(path string) error {
 	p.state = State{Path: path, Playing: true}
 	p.mu.Unlock()
 	if _, ok := p.command("loadfile", path, "replace"); !ok {
+		// Take the optimistic state back, or the interface shows a spinning
+		// record for a track that never started.
+		p.mu.Lock()
+		p.state = State{}
+		p.mu.Unlock()
 		return fmt.Errorf("mpv refused the file")
 	}
 	p.command("set_property", "pause", false)
@@ -302,13 +297,9 @@ func (p *Player) State() State {
 		// but only so far. mpv reports time-pos several times a second; if an
 		// update goes missing, running the clock on indefinitely would show a
 		// time the track never reached and then jump back when it resumed.
-		ahead := time.Since(p.posAt)
-		if ahead > time.Second {
-			ahead = time.Second
-		}
-		st.Position += ahead
-		if st.Duration > 0 && st.Position > st.Duration {
-			st.Position = st.Duration
+		st.Position += min(time.Since(p.posAt), time.Second)
+		if st.Duration > 0 {
+			st.Position = min(st.Position, st.Duration)
 		}
 	}
 	return st

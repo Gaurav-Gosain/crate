@@ -98,7 +98,10 @@ type App struct {
 
 	// play mode: the record player, the library it plays from, and the
 	// decoded audio behind the visualiser.
-	player       *player.Player
+	player *player.Player
+	// animGen identifies the current play-mode session, so a stale animate
+	// loop can tell it has been replaced and exit.
+	animGen      int
 	songs        []library.Song
 	playCursor   int
 	playLoading  bool
@@ -142,7 +145,16 @@ type App struct {
 
 	redrawCh chan struct{}
 	quit     chan struct{}
+	// quitOnce guards quit: it is closed from the key reader, the mouse
+	// handler and the command palette, and whichever loses that race must
+	// not close it a second time.
+	quitOnce sync.Once
 	cancel   context.CancelFunc
+}
+
+// stop asks the main loop to exit. Safe to call more than once.
+func (a *App) stop() {
+	a.quitOnce.Do(func() { close(a.quit) })
 }
 
 const maxLogs = 500
@@ -223,12 +235,32 @@ func (a *App) Run() error {
 	for {
 		select {
 		case <-a.quit:
-			if a.cancel != nil {
-				a.cancel()
-			}
+			a.shutdown()
 			return nil
 		case <-a.redrawCh:
 			a.draw()
 		}
+	}
+}
+
+// shutdown releases what the interface holds outside its own process:
+// a running sync's context, the mpv process, and the visualiser's decoder.
+// Quitting from play mode used to leave mpv running forever, because only
+// leavePlay closed it and ctrl-c never went through leavePlay.
+func (a *App) shutdown() {
+	a.mu.Lock()
+	cancel := a.cancel
+	p := a.player
+	stop := a.spectrumStop
+	a.player, a.spectrumStop = nil, nil
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if stop != nil {
+		stop()
+	}
+	if p != nil {
+		p.Close()
 	}
 }

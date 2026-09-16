@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 )
@@ -79,7 +80,7 @@ func Search(ctx context.Context, query string, count int) ([]Result, error) {
 	// A pasted URL is inspected directly, so album and playlist links work
 	// the same way as a text search.
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-		target = "https://music.youtube.com/search?q=" + urlEscape(target)
+		target = "https://music.youtube.com/search?q=" + url.QueryEscape(target)
 	}
 
 	cmd := exec.CommandContext(ctx, "yt-dlp",
@@ -175,22 +176,4 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return strings.TrimSpace(s)
-}
-
-func urlEscape(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '-', r == '_', r == '.', r == '~':
-			b.WriteRune(r)
-		case r == ' ':
-			b.WriteByte('+')
-		default:
-			for _, c := range []byte(string(r)) {
-				fmt.Fprintf(&b, "%%%02X", c)
-			}
-		}
-	}
-	return b.String()
 }

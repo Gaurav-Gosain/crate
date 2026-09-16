@@ -5,10 +5,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -96,7 +98,9 @@ func parseLine(source, line string) Event {
 		}
 	}
 	if m := pctRe.FindStringSubmatch(line); m != nil {
-		fmt.Sscanf(m[1], "%f", &e.Pct)
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			e.Pct = v
+		}
 	}
 	if m := speedRe.FindStringSubmatch(line); m != nil {
 		e.Speed = strings.TrimSpace(m[1])
@@ -120,12 +124,17 @@ const outputTemplate = `%(artist,album_artist,creator,uploader,channel|Unknown A
 // are skipped without touching the network, so running a sync repeatedly is
 // cheap and safe.
 //
-// Work is split across c.Parallel yt-dlp processes using strided playlist
-// selection, so worker k of n takes items k+1, k+1+n, k+1+2n and so on. This
-// keeps each process inside the playlist, which matters because album and
-// track-number metadata come from that context and would be lost if items
-// were fetched as standalone URLs.
-func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- Event) error {
+// Work is split across up to c.Parallel yt-dlp processes using strided
+// playlist selection, so worker k of n takes items k+1, k+1+n, k+1+2n and so
+// on. This keeps each process inside the playlist, which matters because
+// album and track-number metadata come from that context and would be lost
+// if items were fetched as standalone URLs.
+//
+// sem, when non-nil, bounds how many yt-dlp processes this call may have
+// running at once. It is shared between concurrently syncing sources: gating
+// whole sources instead, as the callers used to, let each admitted source
+// fan out to c.Parallel shards and the real bound was Parallel squared.
+func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- Event, sem chan struct{}) error {
 	dest := c.Library
 	if s.Dir != "" {
 		dest = filepath.Join(c.Library, s.Dir)
@@ -134,12 +143,9 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		return err
 	}
 
-	n := c.Parallel
-	if n < 1 {
-		n = 1
-	}
+	n := max(c.Parallel, 1)
 
-	groups := plan(ctx, s, n)
+	groups := plan(ctx, s, n, sem)
 
 	var (
 		wg   sync.WaitGroup
@@ -150,6 +156,8 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		wg.Add(1)
 		go func(g work) {
 			defer wg.Done()
+			release := acquire(sem)
+			defer release()
 			if err := downloadShard(ctx, c, s, dest, g.shard, g.urls, ev); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
@@ -166,6 +174,16 @@ func Download(ctx context.Context, c *config.Config, s config.Source, ev chan<- 
 		return errs[0]
 	}
 	return nil
+}
+
+// acquire takes a slot from sem and returns the release. A nil sem means
+// unbounded, which the tests and one-off callers use.
+func acquire(sem chan struct{}) func() {
+	if sem == nil {
+		return func() {}
+	}
+	sem <- struct{}{}
+	return func() { <-sem }
 }
 
 // work is one yt-dlp invocation: the urls to fetch and, for a flat playlist,
@@ -189,11 +207,21 @@ type work struct {
 // also keeps each process inside the playlist: album and track-number
 // metadata come from that context and would be lost if items were fetched as
 // standalone URLs.
-func plan(ctx context.Context, s config.Source, n int) []work {
+func plan(ctx context.Context, s config.Source, n int, sem chan struct{}) []work {
 	url := config.NormalizeURL(s.URL)
 
+	// A single video has nothing to shard and nothing nested, so the flat
+	// listing would be a wasted yt-dlp round trip costing several seconds
+	// before the download even starts.
+	if singleVideo(url) {
+		return []work{{urls: []string{url}}}
+	}
+
 	var albums []string
-	if top, err := listing(ctx, url); err == nil {
+	release := acquire(sem)
+	top, err := listing(ctx, url)
+	release()
+	if err == nil {
 		for _, e := range top {
 			if e.nested {
 				albums = append(albums, "https://www.youtube.com/playlist?list="+e.id)
@@ -203,7 +231,7 @@ func plan(ctx context.Context, s config.Source, n int) []work {
 
 	if len(albums) == 0 {
 		var out []work
-		for k := 0; k < n; k++ {
+		for k := range n {
 			shard := ""
 			if n > 1 {
 				shard = fmt.Sprintf("%d::%d", k+1, n)
@@ -216,12 +244,21 @@ func plan(ctx context.Context, s config.Source, n int) []work {
 	return shardAlbums(albums, n)
 }
 
+// singleVideo reports whether a url names exactly one track: a watch or
+// youtu.be link with no playlist attached.
+func singleVideo(url string) bool {
+	if strings.Contains(url, "list=") {
+		return false
+	}
+	return strings.Contains(url, "watch?v=") || strings.Contains(url, "youtu.be/")
+}
+
 // shardAlbums deals whole albums out between n workers. Every album must land
 // in exactly one worker's hand: one missed album is an album of music that
 // never downloads.
 func shardAlbums(albums []string, n int) []work {
 	var out []work
-	for k := 0; k < n; k++ {
+	for k := range n {
 		var g []string
 		for i := k; i < len(albums); i += n {
 			g = append(g, albums[i])
@@ -319,6 +356,11 @@ func downloadShard(ctx context.Context, c *config.Config, s config.Source, dest,
 			continue
 		}
 		ev <- parseLine(s.Name, line)
+	}
+	if sc.Err() != nil {
+		// The scanner gave up mid-stream. Keep draining, or the process
+		// blocks on a full pipe and Wait never returns.
+		io.Copy(io.Discard, stdout)
 	}
 	return cmd.Wait()
 }

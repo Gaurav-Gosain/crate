@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
@@ -81,7 +82,7 @@ func RemoveTracks(ctx context.Context, c *config.Config, s config.Source, log fu
 	if len(paths) == 0 {
 		return r, nil
 	}
-	sort.Strings(paths)
+	slices.Sort(paths)
 	r.Files = len(paths)
 
 	// Local copies, where they are kept.
@@ -100,10 +101,14 @@ func RemoveTracks(ctx context.Context, c *config.Config, s config.Source, log fu
 		return r, err
 	}
 
-	// Finally the playlist file, local and remote.
+	// Finally the playlist file, local and remote. A leftover .m3u is not
+	// cosmetic: it is what claimedElsewhere reads, so one that survives here
+	// keeps claiming tracks for a source that no longer exists.
 	if self != "" {
 		os.Remove(filepath.Join(c.Library, self+".m3u"))
-		removeRemote(ctx, c, []string{self + ".m3u"})
+		if err := removeRemote(ctx, c, []string{self + ".m3u"}); err != nil {
+			return r, err
+		}
 	}
 	if log != nil {
 		log("   removed %d file(s), kept %d shared, pruned %d folder(s)", r.Files, r.Kept, r.Pruned)
@@ -147,14 +152,15 @@ func claimedElsewhere(ctx context.Context, c *config.Config, self string) map[st
 // pruneEmpty removes directories left behind with nothing in them.
 func pruneEmpty(root string) int {
 	var dirs []string
-	filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
-		if err == nil && fi.IsDir() && p != root {
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && p != root {
 			dirs = append(dirs, p)
 		}
 		return nil
 	})
 	// Deepest first, so a folder emptied by pruning its child is itself seen.
-	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	slices.Sort(dirs)
+	slices.Reverse(dirs)
 	n := 0
 	for _, d := range dirs {
 		if ents, err := os.ReadDir(d); err == nil && len(ents) == 0 {

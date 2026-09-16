@@ -1,11 +1,12 @@
 package library
 
 import (
+	"cmp"
 	"context"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
@@ -33,14 +34,12 @@ func Tracks(ctx context.Context, c *config.Config) ([]Song, error) {
 	for _, rel := range idx.byKey {
 		out = append(out, trackFromPath(rel))
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Artist != out[j].Artist {
-			return strings.ToLower(out[i].Artist) < strings.ToLower(out[j].Artist)
-		}
-		if out[i].Album != out[j].Album {
-			return strings.ToLower(out[i].Album) < strings.ToLower(out[j].Album)
-		}
-		return out[i].Rel < out[j].Rel
+	slices.SortFunc(out, func(a, b Song) int {
+		return cmp.Or(
+			cmp.Compare(strings.ToLower(a.Artist), strings.ToLower(b.Artist)),
+			cmp.Compare(strings.ToLower(a.Album), strings.ToLower(b.Album)),
+			cmp.Compare(a.Rel, b.Rel),
+		)
 	})
 	return out, nil
 }

@@ -2,15 +2,36 @@ package ui
 
 import (
 	"context"
-	"strings"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
-
 	"github.com/Gaurav-Gosain/crate/internal/library"
 	"github.com/Gaurav-Gosain/crate/internal/state"
 )
+
+// cfgSnapshot copies the config for a background push. The live config is
+// mutated under a.mu by the input handlers; state.Push reads it without that
+// lock, so it gets a copy that cannot change under it.
+func (a *App) cfgSnapshot() *config.Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cp := *a.cfg
+	cp.Sources = slices.Clone(a.cfg.Sources)
+	cp.Removed = maps.Clone(a.cfg.Removed)
+	return &cp
+}
+
+// saveCfg writes the config while holding the state lock. Save marshals the
+// whole struct, and without the lock that read races a source being appended
+// from another goroutine.
+func (a *App) saveCfg() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.Save()
+}
 
 func (a *App) setRow(i int, fn func(*row)) {
 	a.mu.Lock()
@@ -85,16 +106,18 @@ func (a *App) run(idx []int) {
 			if e.Pct >= 0 {
 				continue
 			}
-			if interesting(e.Text) {
+			if library.Interesting(e.Text) {
 				a.logf("%s", e.Text)
 			}
 		}
 	}()
 
 	// Sources download concurrently, each internally sharded. The semaphore
-	// bounds the total number of yt-dlp processes; without it n sources each
-	// fanning out to n workers would start n squared of them.
-	sem := make(chan struct{}, a.cfg.Parallel)
+	// is handed to Download and shared by every shard of every source, so it
+	// bounds the total number of yt-dlp processes. Gating whole sources here
+	// instead, as this used to, let each admitted source fan out to Parallel
+	// shards of its own and the real bound was Parallel squared.
+	sem := make(chan struct{}, max(a.cfg.Parallel, 1))
 	var (
 		wg       sync.WaitGroup
 		fmu      sync.Mutex
@@ -112,8 +135,6 @@ func (a *App) run(idx []int) {
 		wg.Add(1)
 		go func(i int, src config.Source) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
 
 			a.setRow(i, func(r *row) {
 				r.state, r.pct, r.phase = running, -1, library.PhaseFetching
@@ -152,7 +173,7 @@ func (a *App) run(idx []int) {
 				}
 			}()
 
-			err := library.Download(ctx, a.cfg, src, rowEv)
+			err := library.Download(ctx, a.cfg, src, rowEv, sem)
 			close(rowEv)
 			<-relay
 
@@ -192,7 +213,7 @@ func (a *App) run(idx []int) {
 	close(ev)
 	<-done
 
-	if err := state.Push(ctx, a.cfg); err != nil {
+	if err := state.Push(ctx, a.cfgSnapshot()); err != nil {
 		a.logf("could not publish shared state: %v", err)
 	}
 
@@ -201,20 +222,4 @@ func (a *App) run(idx []int) {
 	} else {
 		a.logf("done with %d failure(s)", failures)
 	}
-}
-
-// interesting filters the firehose down to lines a person would want in a log.
-func interesting(s string) bool {
-	switch {
-	case strings.HasPrefix(s, "[download] Destination:"),
-		strings.HasPrefix(s, "[ExtractAudio]"),
-		strings.HasPrefix(s, "[Metadata]"),
-		strings.Contains(s, "has already been recorded"),
-		strings.HasPrefix(s, "ERROR"),
-		strings.HasPrefix(s, "WARNING"):
-		return true
-	case strings.Contains(s, "sent ") && strings.Contains(s, "bytes"):
-		return true
-	}
-	return false
 }

@@ -21,8 +21,15 @@ func (a *App) draw() {
 		return
 	}
 
+	// Pick up a theme change here, at the top of the frame. The palette vars
+	// are unsynchronised, so the drawing goroutine is the only place allowed
+	// to write them; a theme switch elsewhere just records itself and asks
+	// for a redraw.
+	applyTheme()
+
 	a.mu.Lock()
 	m := a.mode
+	under := a.prevMode
 	rows := make([]row, len(a.rows))
 	copy(rows, a.rows)
 	logs := a.logs
@@ -41,7 +48,7 @@ func (a *App) draw() {
 	// with it: the terminal treats the cells as cleared and the picture is
 	// gone, after which every attempt to place it again reports an image that
 	// does not exist.
-	inPlayView := m == modePlay || (m == modeOverlay && func() mode { a.mu.Lock(); defer a.mu.Unlock(); return a.prevMode }() == modePlay)
+	inPlayView := m == modePlay || (m == modeOverlay && under == modePlay)
 	if !inPlayView {
 		b.WriteString("\x1b[2J")
 	}
@@ -51,9 +58,6 @@ func (a *App) draw() {
 	if m == modeOverlay {
 		// The overlay floats over whatever was underneath, so that is drawn
 		// first and the panel put on top of it.
-		a.mu.Lock()
-		under := a.prevMode
-		a.mu.Unlock()
 		if under == modePlay {
 			a.drawPlay(&b, w, h)
 		} else {
@@ -276,9 +280,6 @@ func rowDetail(r row) string {
 	return ""
 }
 
-// drawLogs fills the activity pane from the bottom up, so the newest line
-// always sits just above the footer rule and the empty space, when there is
-// little to show, is above the text rather than a void below it.
 // drawLogs fills the activity pane from the bottom up, so the newest line sits
 // just above the footer rule. The section label travels with the block rather
 // than being stranded at the top of an empty pane, so when there is little to

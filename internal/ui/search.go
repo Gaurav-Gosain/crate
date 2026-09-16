@@ -75,31 +75,19 @@ func (a *App) addResult(r library.Result) {
 			return
 		}
 	}
-	a.cfg.ClearRemoved(src.URL)
-	a.cfg.Sources = append(a.cfg.Sources, src)
-	a.rows = append(a.rows, row{src: src, state: idle})
 	a.mode = modeList
 	a.results = nil
-	a.cursor = len(a.rows) - 1
 	a.mu.Unlock()
 
-	if err := a.cfg.Save(); err != nil {
-		a.logf("could not save config: %v", err)
+	idx := a.commitSource(src)
+	if idx < 0 {
 		return
 	}
-	a.logf("added %s", name)
-	switch {
-	case config.IsEndlessMix(src.URL):
-		a.logf("note: that is a generated radio mix, which has no end and can pull in hundreds of tracks")
-	case config.IsArtistChannel(src.URL):
-		a.logf("note: that is a whole artist catalogue, usually hundreds of tracks and several gigabytes")
-	}
 	a.redraw()
-
-	a.mu.Lock()
-	idx := len(a.rows) - 1
-	a.mu.Unlock()
-	a.run([]int{idx})
+	// In the background: this is the input goroutine, and run blocks for the
+	// whole download and mirror. Run here, every key including ctrl-c was
+	// dead until the sync finished.
+	go a.run([]int{idx})
 }
 
 func (a *App) handleSearchKey(c byte) bool {
@@ -162,7 +150,7 @@ func (a *App) drawResults(b *strings.Builder, w, h int) {
 		start = cur - avail + 1
 	}
 
-	for i := 0; i < avail; i++ {
+	for i := range avail {
 		moveTo(b, top+i, 1)
 		clearLine(b)
 		if start+i >= len(res) {

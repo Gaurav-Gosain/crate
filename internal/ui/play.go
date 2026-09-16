@@ -46,16 +46,26 @@ func (a *App) enterPlay() {
 		cancel()
 
 		a.mu.Lock()
+		if a.mode != modePlay {
+			// The user left play mode while the library was loading. There
+			// is nothing to hand the player to, so close it here or the mpv
+			// process outlives the view it was opened for.
+			a.mu.Unlock()
+			p.Close()
+			return
+		}
 		a.player = p
 		a.songs = songs
 		a.playLoading = false
 		a.playCursor = 0
+		a.animGen++
+		gen := a.animGen
 		a.mu.Unlock()
 		if lerr != nil {
 			a.logf("play: could not list the library: %v", lerr)
 		}
 		a.redraw()
-		go a.animate()
+		go a.animate(gen)
 	}()
 }
 
@@ -64,12 +74,18 @@ func (a *App) leavePlay() {
 	a.mu.Lock()
 	p := a.player
 	cover := a.cover
+	stop := a.spectrumStop
 	a.player = nil
-	a.spectrum = nil
+	a.spectrum, a.spectrumStop = nil, nil
 	a.cover, a.coverFor = nil, ""
 	a.lyrics, a.lyricsFor, a.lyricsNote = nil, "", ""
 	a.mode = modeList
 	a.mu.Unlock()
+	// Without this the decoder keeps pulling the whole track through ffmpeg
+	// for a visualiser that no longer exists.
+	if stop != nil {
+		stop()
+	}
 	if cover != nil {
 		a.write(cover.deleteCmd())
 		cover.cleanup()
@@ -83,14 +99,17 @@ func (a *App) leavePlay() {
 // animate redraws while a record is turning. Fifteen frames a second is
 // enough for the vinyl to look smooth and the bars to track a beat, and cheap
 // enough that it does not compete with a running sync.
-func (a *App) animate() {
+// The generation ties the loop to one visit to play mode: leaving and
+// re-entering within a tick used to let the old loop latch onto the new
+// session, after which two tickers redrew the same screen for good.
+func (a *App) animate(gen int) {
 	t := time.NewTicker(66 * time.Millisecond)
 	defer t.Stop()
 	slow := 0
 	for range t.C {
 		a.mu.Lock()
 		p := a.player
-		inPlay := a.mode == modePlay
+		inPlay := a.mode == modePlay && a.animGen == gen
 		a.mu.Unlock()
 		if !inPlay || p == nil {
 			return
@@ -141,6 +160,11 @@ func (a *App) playSelected() {
 	a.spectrum, a.spectrumStop, a.nowPlaying = sp, cancel, song
 	old := a.cover
 	a.cover, a.coverFor = nil, song.Rel
+	// Claim the lyrics slot here rather than inside the goroutine below.
+	// Claimed there, two quick track changes can interleave so the older
+	// goroutine claims last, and the fetch for the previous track then
+	// passes the staleness check and shows its words over the new one.
+	a.lyrics, a.lyricsFor, a.lyricsNote = nil, song.Rel, "looking for lyrics..."
 	a.mu.Unlock()
 
 	// Release the previous cover inside the terminal. Without this the
@@ -154,16 +178,12 @@ func (a *App) playSelected() {
 	// Lyrics are looked up in the background: the track is already playing and
 	// should not wait on a web request that may find nothing.
 	go func() {
-		a.mu.Lock()
-		a.lyrics, a.lyricsFor, a.lyricsNote = nil, song.Rel, "looking for lyrics..."
-		a.mu.Unlock()
-
 		// Wait for the track length before searching. Duration is the
 		// strongest evidence that a result is the same recording rather than
 		// a cover or a remix, and mpv only knows it a moment after the file
 		// opens. Searching without it matched a different artist's version.
 		var dur time.Duration
-		for i := 0; i < 30; i++ {
+		for range 30 {
 			if d := p.State().Duration; d > 0 {
 				dur = d
 				break
@@ -201,17 +221,15 @@ func (a *App) playSelected() {
 		}
 		a.mu.Lock()
 		stale := a.coverFor != song.Rel
-		a.mu.Unlock()
-		if stale {
-			art.cleanup()
-			return
-		}
-
-		a.mu.Lock()
-		if a.coverFor == song.Rel {
+		if !stale {
 			a.cover = art
 		}
 		a.mu.Unlock()
+		if stale {
+			// The track moved on while the cover was decoding.
+			art.cleanup()
+			return
+		}
 		a.redraw()
 	}()
 }
@@ -361,7 +379,7 @@ func (a *App) togglePane(name string) {
 	on := a.panes.toggle(name)
 	a.cfg.Play.Panes = a.panes.names()
 	a.mu.Unlock()
-	if err := a.cfg.Save(); err != nil {
+	if err := a.saveCfg(); err != nil {
 		a.logf("could not remember the panes: %v", err)
 	}
 	if on {
@@ -377,13 +395,7 @@ func (a *App) movePlayCursor(d, n int) {
 		return
 	}
 	a.mu.Lock()
-	a.playCursor += d
-	if a.playCursor < 0 {
-		a.playCursor = 0
-	}
-	if a.playCursor >= n {
-		a.playCursor = n - 1
-	}
+	a.playCursor = clamp(a.playCursor+d, 0, n-1)
 	a.mu.Unlock()
 }
 
@@ -689,13 +701,7 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 	if cursor >= 0 && cursor < len(pos) {
 		cp = pos[cursor]
 	}
-	start := cp - r.h/2
-	if start > len(rows)-r.h {
-		start = len(rows) - r.h
-	}
-	if start < 0 {
-		start = 0
-	}
+	start := max(min(cp-r.h/2, len(rows)-r.h), 0)
 
 	// Which song each visible row is, for turning a click back into a track.
 	// Headings and spacers map to none.
@@ -762,19 +768,22 @@ func (a *App) drawPlayList(b *strings.Builder, songs []library.Song, cursor int,
 // inside keep. Writing spaces over a cell erases it just as a screen clear
 // would, so the artwork has to be stepped around rather than painted over.
 func clearExcept(b *strings.Builder, w, top, h int, keep rect) {
+	// One run of blanks, sliced per row: building it per row was a fresh
+	// allocation for every line of every frame.
+	spaces := strings.Repeat(" ", w)
 	for y := top; y < top+h; y++ {
 		if keep.w == 0 || y < keep.y || y >= keep.y+keep.h {
 			moveTo(b, y, 1)
-			b.WriteString(strings.Repeat(" ", w))
+			b.WriteString(spaces)
 			continue
 		}
 		if keep.x > 1 {
 			moveTo(b, y, 1)
-			b.WriteString(strings.Repeat(" ", keep.x-1))
+			b.WriteString(spaces[:keep.x-1])
 		}
 		if right := w - (keep.x + keep.w) + 1; right > 0 {
 			moveTo(b, y, keep.x+keep.w)
-			b.WriteString(strings.Repeat(" ", right))
+			b.WriteString(spaces[:right])
 		}
 	}
 }
@@ -898,7 +907,7 @@ func drawCoverPlaceholder(b *strings.Builder, r rect) {
 		return
 	}
 	label := truncate("no cover", r.w-4)
-	for y := 0; y < r.h; y++ {
+	for y := range r.h {
 		moveTo(b, r.y+y, r.x)
 		switch {
 		case y == 0:
@@ -935,10 +944,7 @@ func (a *App) drawTransport(b *strings.Builder, st player.State, r rect) {
 	}
 
 	barX := r.x + 2 + 2 + visibleWidth(elapsed) + 2
-	barW := r.x + r.w - barX - visibleWidth(remain) - 2
-	if barW < 6 {
-		barW = 6
-	}
+	barW := max(r.x+r.w-barX-visibleWidth(remain)-2, 6)
 
 	pct := 0.0
 	if st.Duration > 0 {
@@ -987,7 +993,7 @@ func (a *App) drawLyrics(b *strings.Builder, st player.State, l *lyrics.Lyrics, 
 	first := cur - r.h/3
 	t := theme.Current()
 
-	for i := 0; i < r.h; i++ {
+	for i := range r.h {
 		idx := first + i
 		if idx < 0 || idx >= len(l.Lines) {
 			continue

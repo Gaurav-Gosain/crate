@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -211,6 +210,3 @@ func graphicsError(apc []byte) string {
 	}
 	return msg
 }
-
-// itoa keeps the escape building free of fmt in the hot path.
-func itoa(n int) string { return strconv.Itoa(n) }

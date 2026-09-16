@@ -24,7 +24,9 @@ func main() {
 		at, _ = strconv.ParseFloat(os.Args[2], 64)
 	}
 	if len(os.Args) > 3 {
-		theme.Set(os.Args[3])
+		if err := theme.Set(os.Args[3]); err != nil {
+			fmt.Fprintf(os.Stderr, "vinylpreview: %v\n", err)
+		}
 	}
 	t := theme.Current()
 
@@ -49,7 +51,7 @@ func main() {
 	pos := time.Duration(at * float64(time.Second))
 	// Advance a few frames so the smoothing settles, as it would in use.
 	var vals, peaks []float64
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		vals, peaks = sp.BarsWithPeaks(pos+time.Duration(i)*40*time.Millisecond, ui.BarCount(100))
 	}
 	for _, line := range ui.BarsPreview(vals, peaks, 12, t) {

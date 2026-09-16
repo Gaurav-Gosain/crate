@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -125,14 +126,7 @@ func (p Play) Enabled() (map[string]bool, error) {
 	}
 	var bad []string
 	for _, n := range p.Panes {
-		known := false
-		for _, k := range PaneNames {
-			if n == k {
-				known = true
-				break
-			}
-		}
-		if !known {
+		if !slices.Contains(PaneNames, n) {
 			bad = append(bad, n)
 			continue
 		}
@@ -237,6 +231,10 @@ func Load() (*Config, error) {
 	if c.Format == "" {
 		c.Format = defaults().Format
 	}
+	if c.Quality == "" {
+		// yt-dlp treats an empty --audio-quality as an error, not a default.
+		c.Quality = defaults().Quality
+	}
 	if c.Parallel < 1 {
 		c.Parallel = defaults().Parallel
 	}
@@ -258,7 +256,8 @@ func (c *Config) Save() error {
 }
 
 // Keep reports whether to retain local files after mirroring. It defaults to
-// true, because throwing away a user's only copy should be opt in.
+// false: the staging directory is cleared once the mirror has confirmed the
+// upload, so the remote stays the single source of truth.
 func (c *Config) Keep() bool {
 	return c.KeepLocal != nil && *c.KeepLocal
 }

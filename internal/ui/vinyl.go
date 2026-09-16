@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/Gaurav-Gosain/crate/internal/theme"
@@ -26,14 +26,14 @@ func vinyl(cols, rows int, rot float64, t theme.Theme) []string {
 	}
 	w, h := cols, rows*2
 
-	lr, lg, lb := hexRGB(t.Accent)
+	lr, lg, lb := theme.RGB(t.Accent)
 	out := make([]string, 0, rows)
-	var b strings.Builder
+	var b []byte
 
+	// Normalise to [-1,1] with the shorter axis setting the scale, so the
+	// record stays circular in any terminal shape.
+	size := math.Min(float64(w), float64(h))
 	shade := func(px, py int) (int, int, int) {
-		// Normalise to [-1,1] with the shorter axis setting the scale, so the
-		// record stays circular in any terminal shape.
-		size := math.Min(float64(w), float64(h))
 		x := (float64(px) - float64(w)/2) / (size / 2)
 		y := (float64(py) - float64(h)/2) / (size / 2)
 		r := math.Hypot(x, y)
@@ -103,26 +103,43 @@ func vinyl(cols, rows int, rot float64, t theme.Theme) []string {
 		return v, v, v
 	}
 
-	for row := 0; row < rows; row++ {
-		b.Reset()
-		for col := 0; col < cols; col++ {
+	// Number formatting is done by hand: this runs for every pixel of every
+	// frame, fifteen times a second, and going through fmt here was about a
+	// third of the whole frame's cost.
+	for row := range rows {
+		b = b[:0]
+		for col := range cols {
 			tr, tg, tb := shade(col, row*2)
 			br, bg, bb := shade(col, row*2+1)
 			switch {
 			case tr < 0 && br < 0:
-				b.WriteByte(' ')
+				b = append(b, ' ')
 			case tr < 0:
-				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm▄%s", br, bg, bb, reset)
+				b = appendRGB(b, "\x1b[38;2;", br, bg, bb)
+				b = append(b, "▄"+reset...)
 			case br < 0:
-				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm▀%s", tr, tg, tb, reset)
+				b = appendRGB(b, "\x1b[38;2;", tr, tg, tb)
+				b = append(b, "▀"+reset...)
 			default:
-				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀%s",
-					tr, tg, tb, br, bg, bb, reset)
+				b = appendRGB(b, "\x1b[38;2;", tr, tg, tb)
+				b = appendRGB(b, "\x1b[48;2;", br, bg, bb)
+				b = append(b, "▀"+reset...)
 			}
 		}
-		out = append(out, b.String())
+		out = append(out, string(b))
 	}
 	return out
+}
+
+// appendRGB writes one truecolor escape, prefix;r;g;bm, without fmt.
+func appendRGB(b []byte, prefix string, r, g, bl int) []byte {
+	b = append(b, prefix...)
+	b = strconv.AppendInt(b, int64(r), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(g), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(bl), 10)
+	return append(b, 'm')
 }
 
 // angleDiff returns the smallest signed angle between two bearings, so a notch
@@ -134,17 +151,6 @@ func angleDiff(a, b float64) float64 {
 		d += 2 * math.Pi
 	}
 	return d - math.Pi
-}
-
-// hexRGB parses "#rrggbb" for the vinyl label.
-func hexRGB(hex string) (int, int, int) {
-	h := strings.TrimPrefix(hex, "#")
-	if len(h) != 6 {
-		return 200, 200, 200
-	}
-	var r, g, bl int
-	fmt.Sscanf(h, "%02x%02x%02x", &r, &g, &bl)
-	return r, g, bl
 }
 
 // spectrumBars renders the visualiser.
@@ -166,13 +172,18 @@ func spectrumBars(vals, peaks []float64, rows int, t theme.Theme) []string {
 
 	lines := make([]string, rows)
 	var b strings.Builder
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		b.Reset()
 		rowFromBottom := rows - 1 - row
+		// Colour by height so a tall bar shades through the gradient, which
+		// is what gives the display its depth. The gradient position only
+		// depends on the row, so the colours are sampled once per row here
+		// rather than once per cell: SpectrumAt parses hex stops and
+		// formats an escape, and per cell it dominated the whole renderer.
+		p := float64(rowFromBottom) / float64(rows)
+		rowColor := t.SpectrumAt(p)
+		peakColor := t.SpectrumAt(math.Min(1, p+0.15))
 		for i, v := range vals {
-			// Colour by height so a tall bar shades through the gradient,
-			// which is what gives the display its depth.
-			p := float64(rowFromBottom) / float64(rows)
 			filled := v * float64(rows)
 			cell := filled - float64(rowFromBottom)
 
@@ -197,18 +208,26 @@ func spectrumBars(vals, peaks []float64, rows int, t theme.Theme) []string {
 
 			switch {
 			case markHere:
-				b.WriteString(t.SpectrumAt(math.Min(1, p+0.15)))
-				b.WriteString(strings.Repeat("▁", barW))
+				b.WriteString(peakColor)
+				for range barW {
+					b.WriteString("▁")
+				}
 				b.WriteString(reset)
 			case g == ' ':
-				b.WriteString(strings.Repeat(" ", barW))
+				for range barW {
+					b.WriteByte(' ')
+				}
 			default:
-				b.WriteString(t.SpectrumAt(p))
-				b.WriteString(strings.Repeat(string(g), barW))
+				b.WriteString(rowColor)
+				for range barW {
+					b.WriteRune(g)
+				}
 				b.WriteString(reset)
 			}
 			if i < len(vals)-1 {
-				b.WriteString(strings.Repeat(" ", gap))
+				for range gap {
+					b.WriteByte(' ')
+				}
 			}
 		}
 		lines[row] = b.String()

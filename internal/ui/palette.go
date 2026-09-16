@@ -47,7 +47,7 @@ func (a *App) openPalette() {
 		})
 	}
 	items = append(items, overlayItem{label: "quit", detail: "q", run: func() {
-		close(a.quit)
+		a.stop()
 	}})
 
 	a.openOverlay(&overlayState{
@@ -77,9 +77,10 @@ func (a *App) openThemes() {
 					a.logf("theme: %v", err)
 					return
 				}
-				applyTheme()
+				a.mu.Lock()
 				a.cfg.Theme = n
-				if err := a.cfg.Save(); err != nil {
+				a.mu.Unlock()
+				if err := a.saveCfg(); err != nil {
 					a.logf("could not remember the theme: %v", err)
 				}
 				a.logf("theme: %s", n)
@@ -91,13 +92,15 @@ func (a *App) openThemes() {
 		title: "themes",
 		hint:  "↑↓ preview   ⏎ apply   esc cancel",
 		all:   items,
+		// The palette itself is refreshed by the drawing loop; these only
+		// switch the active theme and ask for a frame.
 		preview: func(it overlayItem) {
 			_ = theme.Set(it.label)
-			applyTheme()
+			a.redraw()
 		},
 		cancel: func() {
 			_ = theme.Set(before)
-			applyTheme()
+			a.redraw()
 		},
 	})
 	// Start on the theme in use, so the picker opens where the eye expects.

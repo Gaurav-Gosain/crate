@@ -1,13 +1,14 @@
 package library
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -321,9 +322,14 @@ func Playlists(ctx context.Context, c *config.Config, ev chan<- Event) ([]Playli
 	}
 	wg.Wait()
 
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b Playlist) int { return cmp.Compare(a.Name, b.Name) })
 	if len(out) == 0 && len(errs) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	// Partial failures still matter: a source that stopped resolving keeps
+	// its stale playlist and nothing else would ever say so.
+	for _, e := range errs {
+		send(ev, Event{Source: "playlists", Text: "WARNING: " + e, Pct: -1, Phase: PhasePlaylisting})
 	}
 	return out, nil
 }

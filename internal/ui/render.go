@@ -28,6 +28,10 @@ var (
 )
 
 // applyTheme refreshes the palette from the active theme.
+//
+// Only the startup path and the drawing goroutine may call this. The vars are
+// read unlocked by everything that draws, so refreshing them from the input
+// goroutine, as the theme preview once did, raced the frame being painted.
 func applyTheme() {
 	t := theme.Current()
 	accent = theme.Fg(t.Accent)
