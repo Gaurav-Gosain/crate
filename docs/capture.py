@@ -35,7 +35,13 @@ while time.time() < deadline:
             break
         stream.feed(data)
     if KEYS and not sent and time.time() > deadline - SECS / 2:
-        os.write(fd, KEYS)
+        # A "~" in the key string waits a second before the next key. Some
+        # views need time to load before the next keystroke means anything:
+        # pressing enter before the library has arrived selects nothing.
+        for chunk in KEYS.split(b"~"):
+            if chunk:
+                os.write(fd, chunk)
+            time.sleep(1.0)
         sent = True
 
 try:

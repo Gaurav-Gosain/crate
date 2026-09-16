@@ -2,22 +2,42 @@ package ui
 
 import (
 	"fmt"
+
+	"github.com/Gaurav-Gosain/crate/internal/theme"
 	"strings"
 	"unicode/utf8"
 )
 
-// A small palette, kept to what a 256-colour terminal reliably shows.
 const (
-	reset  = "\x1b[0m"
-	bold   = "\x1b[1m"
-	dim    = "\x1b[2m"
-	accent = "\x1b[38;5;75m"
-	ok     = "\x1b[38;5;114m"
-	warn   = "\x1b[38;5;179m"
-	bad    = "\x1b[38;5;174m"
-	muted  = "\x1b[38;5;244m"
-	rule   = "\x1b[38;5;238m"
+	reset = "\x1b[0m"
+	bold  = "\x1b[1m"
+	dim   = "\x1b[2m"
 )
+
+// The palette is a set of variables rather than constants because it follows
+// the selected theme. applyTheme is called once at startup and again whenever
+// the theme changes; everything that draws reads these.
+var (
+	accent = theme.Fg(theme.Current().Accent)
+	ok     = theme.Fg(theme.Current().Ok)
+	warn   = theme.Fg(theme.Current().Warn)
+	bad    = theme.Fg(theme.Current().Bad)
+	muted  = theme.Fg(theme.Current().Muted)
+	rule   = theme.Fg(theme.Current().Rule)
+	fg     = theme.Fg(theme.Current().Fg)
+)
+
+// applyTheme refreshes the palette from the active theme.
+func applyTheme() {
+	t := theme.Current()
+	accent = theme.Fg(t.Accent)
+	ok = theme.Fg(t.Ok)
+	warn = theme.Fg(t.Warn)
+	bad = theme.Fg(t.Bad)
+	muted = theme.Fg(t.Muted)
+	rule = theme.Fg(t.Rule)
+	fg = theme.Fg(t.Fg)
+}
 
 func moveTo(b *strings.Builder, row, col int) {
 	fmt.Fprintf(b, "\x1b[%d;%dH", row, col)

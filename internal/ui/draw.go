@@ -40,6 +40,14 @@ func (a *App) draw() {
 
 	a.drawHeader(&b, w, rows, busy, searching, started)
 
+	if m == modePlay {
+		a.drawPlay(&b, w, h)
+		a.drawFooter(&b, w, h, prompt, buf)
+		b.WriteString("\x1b[?2026l")
+		a.tty.WriteString(b.String())
+		return
+	}
+
 	if m == modeSearch {
 		a.drawResults(&b, w, h)
 		a.drawFooter(&b, w, h, prompt, buf)
@@ -277,9 +285,19 @@ func (a *App) drawFooter(b *strings.Builder, w, h int, prompt, buf string) {
 		fmt.Fprintf(b, " %s%s%s %s%s%s", accent, prompt, reset, buf, accent, "▏"+reset)
 		return
 	}
+	a.mu.Lock()
+	inPlay := a.mode == modePlay
+	a.mu.Unlock()
+
 	keys := [][2]string{
 		{"/", "search"}, {"s", "sync"}, {"a", "add"},
-		{"d", "remove"}, {"r", "rescan"}, {"q", "quit"},
+		{"d", "remove"}, {"r", "rescan"}, {"p", "play"}, {"q", "quit"},
+	}
+	if inPlay {
+		keys = [][2]string{
+			{"space", "pause"}, {"enter", "play"}, {"n/b", "next/prev"},
+			{"h/l", "seek"}, {"t", "theme"}, {"q", "back"},
+		}
 	}
 	var parts []string
 	for _, kv := range keys {

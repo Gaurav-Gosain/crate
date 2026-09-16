@@ -24,6 +24,15 @@ type Source struct {
 }
 
 // Remote describes where the library is mirrored to.
+// Stream describes an HTTP endpoint serving the music tree.
+type Stream struct {
+	// URL is the base the music tree hangs off, e.g.
+	// https://files.gaurav.zip/music
+	URL  string `json:"url,omitempty"`
+	User string `json:"user,omitempty"`
+	Pass string `json:"pass,omitempty"`
+}
+
 type Remote struct {
 	// SSH host, as understood by ssh and rsync. An entry in ~/.ssh/config
 	// is the tidiest way to express this.
@@ -70,9 +79,15 @@ type Config struct {
 	// a staging area: the remote is the only copy, so there is one source of
 	// truth and the two cannot drift apart. Turn it on to also keep an
 	// offline copy, and accept that the two can then disagree.
-	KeepLocal *bool    `json:"keep_local,omitempty"`
-	Remote    Remote   `json:"remote"`
-	Sources   []Source `json:"sources"`
+	KeepLocal *bool  `json:"keep_local,omitempty"`
+	Remote    Remote `json:"remote"`
+	// Theme names the palette the interface draws with.
+	Theme string `json:"theme,omitempty"`
+	// Stream is where play mode fetches audio from when the library is not
+	// kept locally. The remote is the only copy in that mode, so there is
+	// nothing on disk to play.
+	Stream  Stream   `json:"stream,omitempty"`
+	Sources []Source `json:"sources"`
 	// Removed records sources that were deliberately deleted, keyed by
 	// normalised URL. Without it a removal cannot survive a round trip
 	// through the shared state: another device still listing the source

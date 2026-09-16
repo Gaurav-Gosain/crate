@@ -52,6 +52,9 @@ func (a *App) handleKey(c byte) bool {
 	if m == modeSearch {
 		return a.handleSearchKey(c)
 	}
+	if m == modePlay {
+		return a.handlePlayKey(c)
+	}
 
 	switch c {
 	case 'q', 3: // q or ctrl-c
@@ -77,6 +80,8 @@ func (a *App) handleKey(c byte) bool {
 		a.beginSearch()
 	case 'd':
 		a.removeSelected()
+	case 'p':
+		a.enterPlay()
 	case 'r':
 		go a.scanOnly()
 	case '?':

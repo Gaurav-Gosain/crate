@@ -11,6 +11,8 @@ import (
 
 	"github.com/Gaurav-Gosain/crate/internal/config"
 	"github.com/Gaurav-Gosain/crate/internal/library"
+	"github.com/Gaurav-Gosain/crate/internal/player"
+	"github.com/Gaurav-Gosain/crate/internal/theme"
 	"golang.org/x/term"
 )
 
@@ -55,6 +57,7 @@ type mode int
 const (
 	modeList mode = iota
 	modeSearch
+	modePlay
 )
 
 // App owns the terminal and all mutable view state.
@@ -84,6 +87,16 @@ type App struct {
 	// started is when the current run began, for the elapsed clock.
 	started time.Time
 
+	// play mode: the record player, the library it plays from, and the
+	// decoded audio behind the visualiser.
+	player       *player.Player
+	songs        []library.Song
+	playCursor   int
+	playLoading  bool
+	nowPlaying   library.Song
+	spectrum     *player.Spectrum
+	spectrumStop context.CancelFunc
+
 	redrawCh chan struct{}
 	quit     chan struct{}
 	cancel   context.CancelFunc
@@ -92,6 +105,12 @@ type App struct {
 const maxLogs = 500
 
 func New(cfg *config.Config) *App {
+	if err := theme.Set(cfg.Theme); err != nil {
+		// A bad name in the config is worth saying out loud; falling back
+		// silently looks like the theme simply had no effect.
+		fmt.Fprintf(os.Stderr, "crate: %v\n", err)
+	}
+	applyTheme()
 	a := &App{
 		cfg:      cfg,
 		redrawCh: make(chan struct{}, 1),
