@@ -300,6 +300,10 @@ func (a *App) handlePlayKey(c byte) bool {
 		a.togglePane("spectrum")
 	case 'y':
 		a.togglePane("lyrics")
+	case '[':
+		a.nudgeLyrics(-250 * time.Millisecond)
+	case ']':
+		a.nudgeLyrics(250 * time.Millisecond)
 	case 't':
 		a.openThemes()
 	case ':', 11: // ':' or ctrl-k
@@ -466,7 +470,14 @@ func (a *App) drawPlay(b *strings.Builder, w, h int) {
 	panel(b, lay.list, fmt.Sprintf("library · %d tracks", len(songs)), true)
 	panel(b, lay.now, "now playing", false)
 	if lay.lyr.h > 0 {
-		panel(b, lay.lyr, "lyrics", false)
+		title := "lyrics"
+		if lyr != nil && lyr.Offset != 0 {
+			// Show the correction being applied, so a set of words that were
+			// nudged into place is not later mistaken for ones that happened
+			// to line up.
+			title = fmt.Sprintf("lyrics  %+.2gs", lyr.Offset.Seconds())
+		}
+		panel(b, lay.lyr, title, false)
 	}
 	if lay.spec.h > 0 {
 		panel(b, lay.spec, "spectrum", false)
@@ -963,6 +974,31 @@ func (a *App) drawTransport(b *strings.Builder, st player.State, r rect) {
 	a.mu.Lock()
 	a.hitProgress = rect{barX, r.y, barW, 1}
 	a.mu.Unlock()
+}
+
+// nudgeLyrics shifts the words against the music and remembers it.
+//
+// A lyrics service catalogues a release; these files are uploads of it, and
+// the two are often not the same edit. When the words are right but early or
+// late by a constant amount, this is the fix, and it is kept for that track so
+// it only has to be done once.
+func (a *App) nudgeLyrics(d time.Duration) {
+	a.mu.Lock()
+	l, song := a.lyrics, a.nowPlaying
+	a.mu.Unlock()
+	if l == nil || len(l.Lines) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	l.Offset += d
+	off := l.Offset
+	a.mu.Unlock()
+
+	if err := lyrics.SaveOffset(song.Artist, song.Title, off); err != nil {
+		a.logf("could not remember the lyrics offset: %v", err)
+	}
+	a.redraw()
 }
 
 // drawLyrics shows the words for the moment being played, the line in hand

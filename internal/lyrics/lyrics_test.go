@@ -170,3 +170,42 @@ func TestPickAllowsTheNamedArtistWithoutADuration(t *testing.T) {
 		t.Fatal("the artist being named is evidence enough")
 	}
 }
+
+// The offset shifts which line is current, which is the whole point of it:
+// the words are right and their timing is not.
+func TestOffsetShiftsTheCurrentLine(t *testing.T) {
+	l := &Lyrics{Lines: Parse("[00:00.00]a\n[00:10.00]b\n[00:20.00]c\n")}
+	if got := l.At(12 * time.Second); got != 1 {
+		t.Fatalf("without an offset, got line %d", got)
+	}
+	// The upload opens with five seconds the release does not have, so every
+	// line arrives five seconds later than the timings say.
+	l.Offset = 5 * time.Second
+	if got := l.At(12 * time.Second); got != 0 {
+		t.Fatalf("with a five second offset, got line %d, want 0", got)
+	}
+	if got := l.At(16 * time.Second); got != 1 {
+		t.Fatalf("at sixteen seconds, got line %d, want 1", got)
+	}
+}
+
+func TestNegativeOffsetPullsLinesEarlier(t *testing.T) {
+	l := &Lyrics{Lines: Parse("[00:10.00]a\n[00:20.00]b\n")}
+	l.Offset = -5 * time.Second
+	if got := l.At(6 * time.Second); got != 0 {
+		t.Fatalf("got %d, want the first line already showing", got)
+	}
+}
+
+// Among candidates that are all plausible, the closest edit wins: its timings
+// are the ones most likely to line up without a correction.
+func TestPickPrefersTheClosestEditWithinABand(t *testing.T) {
+	cands := []candidate{
+		{TrackName: "Song", ArtistName: "Someone", Duration: 181.8, SyncedLyrics: "[00:01.00]a"},
+		{TrackName: "Song", ArtistName: "Someone", Duration: 180.0, SyncedLyrics: "[00:02.00]b"},
+	}
+	got := pick(cands, []string{"Someone"}, "Song", 180*time.Second)
+	if got == nil || got.Duration != 180.0 {
+		t.Fatalf("picked the %v second edit over the exact one", got.Duration)
+	}
+}

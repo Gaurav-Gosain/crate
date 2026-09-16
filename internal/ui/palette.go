@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"github.com/Gaurav-Gosain/crate/internal/theme"
 )
 
@@ -39,6 +41,8 @@ func (a *App) openPalette() {
 			{label: "toggle the vinyl pane", detail: "v", run: func() { a.togglePane("vinyl") }},
 			{label: "toggle the spectrum pane", detail: "s", run: func() { a.togglePane("spectrum") }},
 			{label: "toggle the lyrics pane", detail: "y", run: func() { a.togglePane("lyrics") }},
+			{label: "nudge lyrics later", detail: "]", run: func() { a.nudgeLyrics(250 * time.Millisecond) }},
+			{label: "nudge lyrics earlier", detail: "[", run: func() { a.nudgeLyrics(-250 * time.Millisecond) }},
 			{label: "leave play mode", detail: "q", run: a.leavePlay},
 		}, items...)
 	} else {

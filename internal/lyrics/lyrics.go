@@ -35,6 +35,10 @@ type Line struct {
 type Lyrics struct {
 	Lines  []Line
 	Synced bool
+	// Offset shifts every line, to line the words up with an upload that is
+	// not the same edit as the release they were timed against. Positive
+	// means the words arrive later.
+	Offset time.Duration
 	// Title and Artist are what the service matched, which is not always what
 	// was asked for and is worth showing so a wrong match is obvious.
 	Title  string
@@ -89,6 +93,7 @@ func (l *Lyrics) At(pos time.Duration) int {
 	if l == nil || len(l.Lines) == 0 {
 		return -1
 	}
+	pos -= l.Offset
 	// The line that is showing is the last one whose time has passed.
 	i := sort.Search(len(l.Lines), func(i int) bool { return l.Lines[i].At > pos })
 	return i - 1
@@ -117,6 +122,7 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 		return nil, fmt.Errorf("no title to search for")
 	}
 	if l, err := readCache(artist, title); err == nil {
+		l.Offset = LoadOffset(artist, title)
 		return l, nil
 	}
 
@@ -174,6 +180,7 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 			continue
 		}
 		writeCache(artist, title, best.SyncedLyrics)
+		l.Offset = LoadOffset(artist, title)
 		return l, nil
 	}
 	if lastErr != nil {
@@ -248,6 +255,10 @@ func pick(cands []candidate, names []string, title string, dur time.Duration) *c
 			default:
 				s -= 10
 			}
+			// Within a band, closer still wins. The bands alone let a
+			// candidate two seconds out beat one that matches exactly, and
+			// the closer edit is the one whose timings will line up.
+			s -= off / 10
 		}
 		ca := fold(c.ArtistName)
 		artistNamed := false
