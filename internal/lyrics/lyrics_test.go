@@ -98,7 +98,7 @@ func TestPickPrefersMatchingDuration(t *testing.T) {
 		{TrackName: "Song", ArtistName: "Someone", Duration: 400, SyncedLyrics: "[00:01.00]a"},
 		{TrackName: "Song", ArtistName: "Someone", Duration: 181, SyncedLyrics: "[00:02.00]b"},
 	}
-	got := pick(cands, "Someone", "Song", 180*time.Second)
+	got := pick(cands, []string{"Someone"}, "Song", 180*time.Second)
 	if got == nil || got.Duration != 181 {
 		t.Fatalf("picked %+v", got)
 	}
@@ -109,7 +109,7 @@ func TestPickRejectsARemixForAPlainTrack(t *testing.T) {
 		{TrackName: "Song - Remix", ArtistName: "Someone", Duration: 180, SyncedLyrics: "[00:01.00]a"},
 		{TrackName: "Song", ArtistName: "Someone", Duration: 180, SyncedLyrics: "[00:02.00]b"},
 	}
-	got := pick(cands, "Someone", "Song", 180*time.Second)
+	got := pick(cands, []string{"Someone"}, "Song", 180*time.Second)
 	if got == nil || got.TrackName != "Song" {
 		t.Fatalf("picked %q", got.TrackName)
 	}
@@ -120,7 +120,7 @@ func TestPickIgnoresUnsyncedResults(t *testing.T) {
 	cands := []candidate{
 		{TrackName: "Song", ArtistName: "Someone", Duration: 180, PlainLyrics: "words"},
 	}
-	if got := pick(cands, "Someone", "Song", 180*time.Second); got != nil {
+	if got := pick(cands, []string{"Someone"}, "Song", 180*time.Second); got != nil {
 		t.Fatal("an unsynced result must not be chosen")
 	}
 }
@@ -132,7 +132,7 @@ func TestPickMatchesAnArtistBuriedInAList(t *testing.T) {
 		{TrackName: "Song", ArtistName: "Nobody", Duration: 180, SyncedLyrics: "[00:01.00]a"},
 		{TrackName: "Song", ArtistName: "Karan Aujla", Duration: 180, SyncedLyrics: "[00:02.00]b"},
 	}
-	got := pick(cands, "Avvy Sra, Karan Aujla, Jaani", "Song", 180*time.Second)
+	got := pick(cands, []string{"Avvy Sra", "Karan Aujla", "Jaani"}, "Song", 180*time.Second)
 	if got == nil || got.ArtistName != "Karan Aujla" {
 		t.Fatalf("picked %+v", got)
 	}
@@ -145,7 +145,7 @@ func TestPickRejectsAnUnrelatedPerformance(t *testing.T) {
 	cands := []candidate{
 		{TrackName: "Heer", ArtistName: "Somebody Else", Duration: 300, SyncedLyrics: "[00:01.00]a"},
 	}
-	if got := pick(cands, "Diljit Dosanjh", "Heer", 254*time.Second); got != nil {
+	if got := pick(cands, []string{"Diljit Dosanjh"}, "Heer", 254*time.Second); got != nil {
 		t.Fatalf("picked an unrelated recording: %+v", got)
 	}
 }
@@ -156,7 +156,7 @@ func TestPickAllowsADifferentArtistWhenTheLengthMatches(t *testing.T) {
 	cands := []candidate{
 		{TrackName: "Heer", ArtistName: "Somebody Else", Duration: 255, SyncedLyrics: "[00:01.00]a"},
 	}
-	if got := pick(cands, "Diljit Dosanjh", "Heer", 254*time.Second); got == nil {
+	if got := pick(cands, []string{"Diljit Dosanjh"}, "Heer", 254*time.Second); got == nil {
 		t.Fatal("a close length is evidence enough")
 	}
 }
@@ -166,7 +166,7 @@ func TestPickAllowsTheNamedArtistWithoutADuration(t *testing.T) {
 	cands := []candidate{
 		{TrackName: "Song", ArtistName: "Karan Aujla", Duration: 0, SyncedLyrics: "[00:01.00]a"},
 	}
-	if got := pick(cands, "Avvy Sra, Karan Aujla", "Song", 0); got == nil {
+	if got := pick(cands, []string{"Avvy Sra", "Karan Aujla"}, "Song", 0); got == nil {
 		t.Fatal("the artist being named is evidence enough")
 	}
 }

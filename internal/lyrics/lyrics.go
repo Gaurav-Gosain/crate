@@ -120,8 +120,70 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 		return l, nil
 	}
 
-	q := url.Values{}
-	q.Set("q", title)
+	clean := cleanTitle(title, artist)
+
+	// Who to ask for. The artist field is trusted only when it names a
+	// person; when it is a label, the performers are looked for in the title
+	// instead, which is where uploaders put them.
+	var names []string
+	if IsLabel(artist) {
+		names = performers(title)
+	} else if f := firstArtist(artist); f != "" {
+		names = []string{f}
+	}
+	first := ""
+	if len(names) > 0 {
+		first = names[0]
+	}
+
+	// Attempts run from most specific to least. Naming the artist finds the
+	// right recording where the title alone is ambiguous, and these titles
+	// are ambiguous constantly; falling back to the title alone catches the
+	// cases where the artist field holds a label or an uploader rather than
+	// a performer, which is most of the time on these files.
+	attempts := []url.Values{}
+	for _, n := range names {
+		attempts = append(attempts, url.Values{"track_name": {clean}, "artist_name": {n}})
+	}
+	attempts = append(attempts, url.Values{"q": {clean}})
+	if first != "" {
+		attempts = append(attempts, url.Values{"q": {clean + " " + first}})
+	}
+	if raw := strings.TrimSpace(title); raw != clean {
+		attempts = append(attempts, url.Values{"q": {raw}})
+	}
+
+	var lastErr error
+	for _, q := range attempts {
+		cands, err := search(ctx, q)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		best := pick(cands, names, clean, dur)
+		if best == nil {
+			continue
+		}
+		l := &Lyrics{
+			Title:  best.TrackName,
+			Artist: best.ArtistName,
+			Synced: true,
+			Lines:  Parse(best.SyncedLyrics),
+		}
+		if len(l.Lines) == 0 {
+			continue
+		}
+		writeCache(artist, title, best.SyncedLyrics)
+		return l, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no synced lyrics for %q", clean)
+}
+
+// search runs one query against the service.
+func search(ctx context.Context, q url.Values) ([]candidate, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://lrclib.net/api/search?"+q.Encode(), nil)
 	if err != nil {
@@ -137,27 +199,11 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("lyrics search: http %d", resp.StatusCode)
 	}
-
 	var cands []candidate
 	if err := json.NewDecoder(resp.Body).Decode(&cands); err != nil {
 		return nil, err
 	}
-	best := pick(cands, artist, title, dur)
-	if best == nil {
-		return nil, fmt.Errorf("no lyrics found for %q", title)
-	}
-
-	l := &Lyrics{
-		Title:  best.TrackName,
-		Artist: best.ArtistName,
-		Synced: best.SyncedLyrics != "",
-		Lines:  Parse(best.SyncedLyrics),
-	}
-	if len(l.Lines) == 0 {
-		return nil, fmt.Errorf("no synced lyrics for %q", title)
-	}
-	writeCache(artist, title, best.SyncedLyrics, l)
-	return l, nil
+	return cands, nil
 }
 
 // pick chooses the best candidate.
@@ -167,14 +213,19 @@ func Fetch(ctx context.Context, artist, title string, dur time.Duration) (*Lyric
 // close to the track being played is the strongest signal that this is the
 // same recording rather than a remix or a cover, and the artist name breaks
 // what ties remain.
-func pick(cands []candidate, artist, title string, dur time.Duration) *candidate {
+func pick(cands []candidate, names []string, title string, dur time.Duration) *candidate {
 	type scored struct {
 		c *candidate
 		s float64
 	}
 	var all []scored
-	wantArtist := fold(artist)
 	wantTitle := fold(title)
+	var wantNames []string
+	for _, n := range names {
+		if f := fold(n); f != "" {
+			wantNames = append(wantNames, f)
+		}
+	}
 
 	for i := range cands {
 		c := &cands[i]
@@ -199,11 +250,13 @@ func pick(cands []candidate, artist, title string, dur time.Duration) *candidate
 			}
 		}
 		ca := fold(c.ArtistName)
-		switch {
-		case wantArtist != "" && strings.Contains(wantArtist, ca):
-			s += 25
-		case wantArtist != "" && strings.Contains(ca, wantArtist):
-			s += 20
+		artistNamed := false
+		for _, w := range wantNames {
+			if ca != "" && (strings.Contains(w, ca) || strings.Contains(ca, w)) {
+				artistNamed = true
+				s += 25
+				break
+			}
 		}
 		ct := fold(c.TrackName)
 		if ct == wantTitle {
@@ -223,7 +276,6 @@ func pick(cands []candidate, artist, title string, dur time.Duration) *candidate
 		// neither is some other performance that happens to share a title,
 		// and these titles are common. Showing the wrong words in time with
 		// the music is worse than showing none, because it looks right.
-		artistNamed := wantArtist != "" && (strings.Contains(wantArtist, ca) || strings.Contains(ca, wantArtist))
 		lengthClose := dur > 0 && c.Duration > 0 && abs(c.Duration-dur.Seconds()) <= 3
 		if !artistNamed && !lengthClose {
 			continue
@@ -273,7 +325,7 @@ func readCache(artist, title string) (*Lyrics, error) {
 	return &Lyrics{Lines: lines, Synced: true}, nil
 }
 
-func writeCache(artist, title, lrc string, l *Lyrics) {
+func writeCache(artist, title, lrc string) {
 	p := cachePath(artist, title)
 	if os.MkdirAll(filepath.Dir(p), 0o755) != nil {
 		return
